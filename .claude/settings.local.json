@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://localhost:3000)",
+      "Bash(npm install *)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { Stop-Process -Id $c.OwningProcess -Force -Confirm:$false; Write-Host \"Server stopped\" } else { Write-Host \"Server not running\" })",
+      "Bash(npm start *)",
+      "Bash(curl -s http://localhost:3000/api/auth/status)",
+      "Bash(awk '{print $9, \"\\(\" $5 \" bytes\\)\"}')"
+    ]
+  }
+}

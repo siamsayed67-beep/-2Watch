@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>2Watch · Watch together, in sync</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="home-page">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">2</span>Watch</a>
+    <div style="margin-left: auto; display: flex; gap: 10px; align-items: center;">
+      <span id="authUser" style="font-size: 13px; color: var(--muted);" hidden></span>
+      <button class="btn small" id="logoutBtn" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main class="home">
+    <section class="hero">
+      <h1>Watch together.<br><span class="accent">Same moment, every screen.</span></h1>
+      <p class="lede">Create a room, share the link, and play a YouTube, Facebook, Vimeo or Twitch video, or upload your own file. Everyone in the room stays on the same second.</p>
+      <ul class="features">
+        <li><strong>Links play from the source.</strong> YouTube and Facebook videos play straight from those sites, so nothing gets stored.</li>
+        <li><strong>Uploads stream from the server.</strong> Your file is hosted here and streamed to every viewer.</li>
+        <li><strong>The server keeps time.</strong> Anyone who drifts or joins late is moved to the right spot automatically.</li>
+      </ul>
+    </section>
+
+    <section class="home-cards">
+      <form class="card" id="createForm">
+        <h2>Start a watch party</h2>
+        <label class="field">
+          <span>Room name</span>
+          <input class="input" id="roomNameInput" maxlength="60" placeholder="Friday movie night">
+        </label>
+        <button class="btn primary big" type="submit">Create room</button>
+        <p class="hint" id="createError"></p>
+      </form>
+
+      <form class="card" id="joinForm">
+        <h2>Have an invite?</h2>
+        <label class="field">
+          <span>Room code or link</span>
+          <input class="input" id="joinInput" placeholder="e.g. k7m2qp" required>
+        </label>
+        <button class="btn big" type="submit">Join room</button>
+      </form>
+    </section>
+  </main>
+
+  <div class="modal" id="authModal" hidden>
+    <form class="modal-card" id="authForm" style="max-width: 380px;">
+      <h2 id="authTitle">Sign in to 2Watch</h2>
+      <label class="field">
+        <span>Email</span>
+        <input class="input" id="authEmail" type="email" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input class="input" id="authPassword" type="password" required>
+      </label>
+      <button class="btn primary big" type="submit" id="authSubmit">Sign in</button>
+      <p class="hint" id="authError"></p>
+      <p class="hint" style="text-align: center; margin-top: 16px;">
+        <span id="toggleAuth">Don't have an account? <a href="#" style="color: var(--accent); cursor: pointer;">Sign up</a></span>
+      </p>
+    </form>
+  </div>
+
+  <script src="/js/auth.js"></script>
+  <script>
+    let authMode = 'signin';
+
+    document.getElementById('toggleAuth').addEventListener('click', (e) => {
+      e.preventDefault();
+      authMode = authMode === 'signin' ? 'signup' : 'signin';
+      document.getElementById('authTitle').textContent = authMode === 'signin' ? 'Sign in to 2Watch' : 'Create account';
+      document.getElementById('authSubmit').textContent = authMode === 'signin' ? 'Sign in' : 'Sign up';
+      document.querySelector('#toggleAuth a').textContent = authMode === 'signin' ? "Don't have an account? Sign up" : 'Already have an account? Sign in';
+      document.getElementById('authError').textContent = '';
+    });
+
+    Auth.init().then(({ user, authEnabled }) => {
+      if (authEnabled) {
+        if (user) showUserMenu(user);
+        else {
+          document.getElementById('createForm').style.display = 'none';
+          document.getElementById('authModal').hidden = false;
+        }
+      }
+    });
+
+    function showUserMenu(user) {
+      document.getElementById('authUser').textContent = user.email;
+      document.getElementById('authUser').hidden = false;
+      document.getElementById('logoutBtn').hidden = false;
+      document.getElementById('authModal').hidden = true;
+      document.getElementById('createForm').style.display = 'block';
+    }
+
+    document.getElementById('authForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+      const errorEl = document.getElementById('authError');
+      const submitBtn = document.getElementById('authSubmit');
+
+      if (!email || !password) {
+        errorEl.textContent = 'Email and password are required.';
+        return;
+      }
+
+      submitBtn.disabled = true;
+      errorEl.textContent = '';
+      try {
+        errorEl.textContent = 'Please add Supabase credentials to .env first. See setup guide.';
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    document.getElementById('logoutBtn').addEventListener('click', () => {
+      Auth.logout();
+      document.getElementById('authUser').hidden = true;
+      document.getElementById('logoutBtn').hidden = true;
+      document.getElementById('authModal').hidden = false;
+      document.getElementById('createForm').style.display = 'none';
+    });
+  </script>
+
+  <script>
+    document.getElementById('createForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.submitter;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: document.getElementById('roomNameInput').value }),
+        });
+        if (!res.ok) throw new Error();
+        const { id } = await res.json();
+        location.href = '/room/' + id;
+      } catch {
+        document.getElementById('createError').textContent = 'Could not create a room. Is the server running?';
+        btn.disabled = false;
+      }
+    });
+    document.getElementById('joinForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const v = document.getElementById('joinInput').value.trim();
+      const code = v.split('/').filter(Boolean).pop();
+      if (code) location.href = '/room/' + encodeURIComponent(code);
+    });
+  </script>
+</body>
+</html>

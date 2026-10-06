@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watch room · 2Watch</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body class="room-page">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">2</span>Watch</a>
+    <div class="room-title">
+      <h1 id="roomName">Loading…</h1>
+      <span id="connStatus" class="conn-status" hidden></span>
+    </div>
+    <div class="top-actions">
+      <span class="viewer-pill" id="viewerCount" title="People watching">0 watching</span>
+      <button class="btn" id="shareBtn" type="button">Copy invite link</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="main-col">
+      <div class="player" id="player">
+        <div class="stage" id="stage">
+          <div class="stage-media" id="stageMedia"></div>
+          <div class="stage-empty" id="stageEmpty">
+            <div class="stage-empty-icon">▶</div>
+            <p><strong>Nothing is playing yet.</strong></p>
+            <p>Paste a YouTube, Facebook, Vimeo or Twitch link, or upload a video below.</p>
+          </div>
+          <!-- Sits over the embedded player so everyone controls playback through the shared controls. -->
+          <div class="stage-shield" id="stageShield"></div>
+          <div class="stage-overlay" id="stageOverlay" hidden></div>
+        </div>
+        <div class="controls" id="controls">
+          <button class="ctrl" id="playBtn" type="button" aria-label="Play"></button>
+          <span class="time" id="timeCur">0:00</span>
+          <input class="seek" id="seek" type="range" min="0" max="0" step="0.1" value="0" aria-label="Seek">
+          <span class="time" id="timeDur">--:--</span>
+          <button class="ctrl" id="muteBtn" type="button" aria-label="Mute"></button>
+          <input class="volume" id="volume" type="range" min="0" max="1" step="0.01" aria-label="Volume">
+          <button class="ctrl" id="skipBtn" type="button" aria-label="Skip to next" title="Skip to next"></button>
+          <button class="ctrl" id="fsBtn" type="button" aria-label="Fullscreen" title="Fullscreen"></button>
+        </div>
+      </div>
+
+      <div class="now-playing" id="nowPlaying" hidden>
+        <span class="badge" id="npKind"></span>
+        <strong class="np-title" id="npTitle"></strong>
+        <span class="np-by" id="npBy"></span>
+        <span class="sync-pill" id="syncPill" title="How far your player is from the room's clock"></span>
+      </div>
+
+      <p class="locked-note" id="lockedNote" hidden>The host has made playback host-only. You can still watch and chat.</p>
+
+      <div class="card" id="addCard">
+        <div class="tabs" role="tablist">
+          <button class="tab active" type="button" data-tab="link" role="tab">Paste a link</button>
+          <button class="tab" type="button" data-tab="upload" role="tab">Upload a video</button>
+        </div>
+
+        <form class="tab-panel" id="linkForm" data-panel="link" autocomplete="off">
+          <input class="input" id="linkInput" type="url" required
+                 placeholder="https://www.youtube.com/watch?v=…  ·  facebook.com/…/videos/…  ·  vimeo.com/…">
+          <div class="row">
+            <button class="btn primary" type="submit" name="mode" value="now">Play now</button>
+            <button class="btn" type="submit" name="mode" value="queue">Add to queue</button>
+          </div>
+          <p class="hint">Links play directly from YouTube, Facebook, Vimeo or Twitch, so nothing gets stored on the server. A direct link to an .mp4, .webm or .m3u8 file works too.</p>
+        </form>
+
+        <div class="tab-panel" data-panel="upload" hidden>
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.mov,.m3u8" hidden>
+            <span class="dz-main" id="dzLabel">Drop a video here or <u>choose a file</u></span>
+            <span class="dz-sub" id="dzSub">MP4 (H.264/AAC) or WebM plays in every browser</span>
+          </label>
+          <div class="upload-progress" id="uploadProgress" hidden>
+            <div class="bar"><div class="bar-fill" id="uploadBar"></div></div>
+            <span id="uploadText">0%</span>
+            <button class="btn small" type="button" id="uploadCancel">Cancel</button>
+          </div>
+          <div class="row">
+            <button class="btn primary" type="button" id="uploadNow" disabled>Upload &amp; play</button>
+            <button class="btn" type="button" id="uploadQueue" disabled>Upload to queue</button>
+          </div>
+          <p class="hint">The file is stored on this server and streamed to everyone in the room. It's deleted when it's replaced or the room closes.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Up next</h2>
+        <ol class="queue" id="queue"></ol>
+        <p class="empty" id="queueEmpty">The queue is empty.</p>
+      </div>
+    </section>
+
+    <aside class="side-col">
+      <div class="card">
+        <h2>Watching now</h2>
+        <ul class="users" id="users"></ul>
+        <label class="host-setting" id="hostSetting" hidden>
+          <input type="checkbox" id="everyoneCtl"> Everyone can control playback
+        </label>
+      </div>
+      <div class="card chat-card">
+        <h2>Chat</h2>
+        <div class="chat-log" id="chatLog"></div>
+        <form class="chat-form" id="chatForm" autocomplete="off">
+          <input class="input" id="chatInput" maxlength="500" placeholder="Say something…">
+          <button class="btn primary" type="submit">Send</button>
+        </form>
+      </div>
+    </aside>
+  </main>
+
+  <div class="modal" id="joinModal">
+    <form class="modal-card" id="joinForm">
+      <p class="eyebrow">You're invited to</p>
+      <h2 id="joinRoomName">a watch party</h2>
+      <label class="field">
+        <span>Your name</span>
+        <input class="input" id="nameInput" maxlength="32" placeholder="e.g. Sam" autofocus>
+      </label>
+      <button class="btn primary big" type="submit">Join the room</button>
+      <p class="hint" id="joinError"></p>
+    </form>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <div id="fb-root"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/players.js"></script>
+  <script src="/js/room.js"></script>
+</body>
+</html>
