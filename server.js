@@ -1,6 +1,11 @@
 'use strict';
 
-require('dotenv').config();
+// Load .env only if it exists (on Vercel, env vars come from dashboard)
+try {
+  require('dotenv').config();
+} catch (e) {
+  // .env file doesn't exist (normal on Vercel)
+}
 
 const path = require('path');
 const fs = require('fs');
