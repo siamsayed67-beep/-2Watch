@@ -120,11 +120,12 @@
     <form class="modal-card" id="joinForm">
       <p class="eyebrow">You're invited to</p>
       <h2 id="joinRoomName">a watch party</h2>
-      <label class="field">
+      <label class="field" id="nameField" hidden>
         <span>Your name</span>
         <input class="input" id="nameInput" maxlength="32" placeholder="e.g. Sam" autofocus>
       </label>
-      <button class="btn primary big" type="submit">Join the room</button>
+      <p class="hint" id="joiningAs" hidden></p>
+      <button class="btn primary big" type="submit" id="joinBtn" disabled>Join the room</button>
       <p class="hint" id="joinError"></p>
     </form>
   </div>
@@ -133,6 +134,7 @@
   <div id="fb-root"></div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="/js/auth.js"></script>
   <script src="/js/players.js"></script>
   <script src="/js/room.js"></script>

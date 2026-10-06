@@ -10,7 +10,8 @@
   };
 
   const roomId = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
-  const clientId =
+  // Replaced by the Supabase user id once the server confirms who we are.
+  let clientId =
     store.get('clientId') ||
     (() => {
       const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -121,30 +122,50 @@
     })
     .catch(() => fatal('This room does not exist or has closed.'));
 
-  // Load initial name from auth or localStorage
-  Auth.init().then(({ user, authEnabled }) => {
-    if (authEnabled && user) {
-      $('nameInput').value = user.username || user.email.split('@')[0];
-    } else {
-      $('nameInput').value = store.get('name') || '';
-    }
-  });
+  let accountsOn = false;
+  const goSignIn = () => location.replace(`/?next=${encodeURIComponent(location.pathname)}`);
+
+  // With accounts switched on, only signed-in people can join; everyone else is sent to sign in first.
+  Auth.ready
+    .then(async (enabled) => {
+      accountsOn = enabled;
+      if (!enabled) {
+        $('nameInput').value = store.get('name') || '';
+        $('nameField').hidden = false;
+      } else {
+        const session = await Auth.getSession();
+        if (!session) return goSignIn();
+        myName = Auth.displayName(session.user);
+        $('joiningAs').textContent = `Joining as ${myName}`;
+        $('joiningAs').hidden = false;
+      }
+      $('joinBtn').disabled = false;
+    })
+    .catch(() => fatal('Could not load the sign-in service. Refresh the page to try again.'));
+
+  const accessToken = async () => (accountsOn ? (await Auth.getSession())?.access_token : undefined);
 
   $('joinForm').addEventListener('submit', (e) => {
     e.preventDefault();
     // This click also counts as the user gesture browsers require before playing sound.
-    myName = $('nameInput').value.trim() || 'Guest';
-    store.set('name', myName);
+    if (!accountsOn) {
+      myName = $('nameInput').value.trim() || 'Guest';
+      store.set('name', myName);
+    }
     $('joinModal').hidden = true;
     connect();
   });
 
   function connect() {
     socket = io();
-    socket.on('connect', () => {
+    socket.on('connect', async () => {
       setConnStatus(null);
-      socket.emit('room:join', { roomId, clientId, name: myName }, (res) => {
+      // Fetched on every (re)connect so a refreshed token is used after long sessions.
+      const token = await accessToken();
+      socket.emit('room:join', { roomId, clientId, name: myName, token }, (res) => {
+        if (res?.needsAuth) return goSignIn();
         if (!res?.ok) return fatal(res?.error || 'Could not join the room.');
+        clientId = res.clientId;
         $('chatLog').replaceChildren();
         res.chat.forEach(addChatMessage);
         syncClock();
@@ -681,13 +702,15 @@
   $('uploadQueue').onclick = () => startUpload('queue');
   $('uploadCancel').onclick = () => currentUpload?.abort();
 
-  function startUpload(mode) {
+  async function startUpload(mode) {
     if (!selectedFile || currentUpload) return;
     const xhr = (currentUpload = new XMLHttpRequest());
     const fd = new FormData();
     fd.append('video', selectedFile);
     xhr.open('POST', `/api/rooms/${encodeURIComponent(roomId)}/upload?mode=${mode}`);
     xhr.setRequestHeader('X-Client-Id', clientId);
+    const token = await accessToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
     $('uploadProgress').hidden = false;
     $('uploadNow').hidden = $('uploadQueue').hidden = true;

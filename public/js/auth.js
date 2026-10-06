@@ -1,57 +1,56 @@
 'use strict';
 
-// Supabase auth management (client-side)
+/*
+ * Supabase accounts. The server tells the page whether accounts are switched on
+ * (/api/config). When they're off, every method resolves to "no user" and the app
+ * falls back to joining with just a name.
+ * Needs the supabase-js script (window.supabase) loaded before this file.
+ */
 window.Auth = (() => {
-  let user = null;
-  let authEnabled = false;
+  let client = null;
 
-  async function init() {
-    try {
-      const token = localStorage.getItem('sb_token');
-      const res = await fetch('/api/auth/status', {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-      });
-      const data = await res.json();
-      authEnabled = data.authEnabled;
-      if (data.authenticated) {
-        user = data.user;
-        localStorage.setItem('sb_user', JSON.stringify(user));
+  const ready = fetch('/api/config')
+    .then((r) => r.json())
+    .then((cfg) => {
+      if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
+        if (!window.supabase?.createClient) throw new Error('Could not load the sign-in library.');
+        client = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
       }
-      return { user, authEnabled };
-    } catch (e) {
-      console.error('Auth init failed:', e);
-      return { user: null, authEnabled: false };
-    }
+      return !!client;
+    });
+
+  async function getSession() {
+    await ready;
+    if (!client) return null;
+    const { data } = await client.auth.getSession();
+    return data.session;
   }
 
-  function getUser() {
-    if (!user) {
-      const stored = localStorage.getItem('sb_user');
-      if (stored) user = JSON.parse(stored);
-    }
-    return user;
+  async function signUp(email, password, username) {
+    await ready;
+    const { data, error } = await client.auth.signUp({
+      email,
+      password,
+      options: { data: { username }, emailRedirectTo: location.origin },
+    });
+    if (error) throw error;
+    // With "Confirm email" on in Supabase there's no session until the link is clicked.
+    return { session: data.session, needsConfirmation: !data.session };
   }
 
-  function setUser(u) {
-    user = u;
-    if (u) localStorage.setItem('sb_user', JSON.stringify(u));
-    else localStorage.removeItem('sb_user');
+  async function signIn(email, password) {
+    await ready;
+    const { data, error } = await client.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return data.session;
   }
 
-  function setToken(token) {
-    if (token) localStorage.setItem('sb_token', token);
-    else localStorage.removeItem('sb_token');
+  async function signOut() {
+    await ready;
+    await client?.auth.signOut();
   }
 
-  function getToken() {
-    return localStorage.getItem('sb_token');
-  }
+  const displayName = (user) => user?.user_metadata?.username || user?.email?.split('@')[0] || 'Guest';
 
-  function logout() {
-    user = null;
-    localStorage.removeItem('sb_token');
-    localStorage.removeItem('sb_user');
-  }
-
-  return { init, getUser, setUser, setToken, getToken, logout, isEnabled: () => authEnabled };
+  return { ready, getSession, signUp, signIn, signOut, displayName };
 })();

@@ -1,11 +1,6 @@
 'use strict';
 
-// Load .env only if it exists (on Vercel, env vars come from dashboard)
-try {
-  require('dotenv').config();
-} catch (e) {
-  // .env file doesn't exist (normal on Vercel)
-}
+require('dotenv').config({ quiet: true });
 
 const path = require('path');
 const fs = require('fs');
@@ -17,11 +12,28 @@ const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { parseMediaUrl, MEDIA_EXTENSIONS } = require('./lib/media');
 
-// Supabase initialization (optional - if credentials not provided, auth is disabled)
-const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY
-  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
+// Supabase accounts are optional: without credentials, people join with just a name.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 const authEnabled = !!supabase;
+
+/** Returns { id, name } for a valid Supabase access token, or null. */
+async function verifyToken(token) {
+  if (!authEnabled || typeof token !== 'string' || !token) return null;
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user) return null;
+    const u = data.user;
+    return { id: u.id, name: u.user_metadata?.username || u.email?.split('@')[0] || 'Guest' };
+  } catch {
+    return null;
+  }
+}
+
+const bearer = (req) => req.get('authorization')?.replace(/^Bearer\s+/i, '');
 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 4096;
@@ -190,7 +202,16 @@ function fmtTime(sec) {
 
 /* -------------------------------------------------------------- HTTP API */
 
-app.post('/api/rooms', (req, res) => {
+// The browser needs these to talk to Supabase. The anon key is meant to be public;
+// what users can do with it is limited by Supabase's own rules.
+app.get('/api/config', (req, res) => {
+  res.json(authEnabled ? { supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY } : {});
+});
+
+app.post('/api/rooms', async (req, res) => {
+  if (authEnabled && !(await verifyToken(bearer(req)))) {
+    return res.status(401).json({ error: 'Sign in to create a room.' });
+  }
   const room = createRoom(clean(req.body?.name, 60, 'Watch party'));
   res.json({ id: room.id });
 });
@@ -224,10 +245,15 @@ const upload = multer({
   },
 });
 
-app.post('/api/rooms/:id/upload', (req, res) => {
+app.post('/api/rooms/:id/upload', async (req, res) => {
   const room = rooms.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
-  const clientId = req.get('x-client-id');
+  let clientId = req.get('x-client-id');
+  if (authEnabled) {
+    const user = await verifyToken(bearer(req));
+    if (!user) return res.status(401).json({ error: 'Your sign-in expired. Refresh the page and try again.' });
+    clientId = user.id;
+  }
   const name = memberName(room, clientId);
   if (!name) return res.status(403).json({ error: 'Join the room before uploading.' });
   if (!canControl(room, clientId)) return res.status(403).json({ error: 'Only the host can add videos in this room.' });
@@ -255,29 +281,6 @@ app.post('/api/rooms/:id/upload', (req, res) => {
     playNowOrQueue(room, item, req.query.mode, name);
     res.json({ ok: true });
   });
-});
-
-/* -------------------------------------------------------- authentication */
-
-app.get('/api/auth/status', async (req, res) => {
-  if (!authEnabled) return res.json({ authEnabled: false });
-  const token = req.get('Authorization')?.replace('Bearer ', '');
-  if (!token) return res.json({ authenticated: false, authEnabled: true });
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user) return res.json({ authenticated: false, authEnabled: true });
-    res.json({
-      authenticated: true,
-      authEnabled: true,
-      user: {
-        id: data.user.id,
-        email: data.user.email,
-        username: data.user.user_metadata?.username || data.user.email?.split('@')[0],
-      },
-    });
-  } catch (e) {
-    res.json({ authenticated: false, authEnabled: true });
-  }
 });
 
 /* ------------------------------------------------------------- realtime */
@@ -334,13 +337,21 @@ io.on('connection', (socket) => {
   // Clients measure their clock offset against this to compute where "now" is in the video.
   socket.on('time:ping', (cb) => typeof cb === 'function' && cb(Date.now()));
 
-  socket.on('room:join', (data, cb) => {
+  socket.on('room:join', async (data, cb) => {
     if (typeof cb !== 'function') return;
+    let clientId = clean(data?.clientId, 64);
+    let name = clean(data?.name, 32, 'Guest');
+    if (authEnabled) {
+      // Signed-in users are identified by their Supabase account, so the host role
+      // follows the account across devices and the name can't be faked.
+      const user = await verifyToken(data?.token);
+      if (!user) return cb({ ok: false, error: 'Please sign in to join this room.', needsAuth: true });
+      clientId = user.id;
+      name = clean(user.name, 32, 'Guest');
+    }
     const room = rooms.get(String(data?.roomId ?? ''));
     if (!room) return cb({ ok: false, error: 'This room does not exist or has closed.' });
-    const clientId = clean(data.clientId, 64);
     if (!clientId) return cb({ ok: false, error: 'Missing client id.' });
-    const name = clean(data.name, 32, 'Guest');
 
     if (socket.data.roomId) leaveRoom(socket);
     const returning = [...room.members.values()].some((m) => m.clientId === clientId);
@@ -352,7 +363,7 @@ io.on('connection', (socket) => {
     if (!room.hostId) room.hostId = clientId;
     if (room.hostId === clientId) clearTimeout(room.hostTimer);
 
-    cb({ ok: true, chat: room.chat });
+    cb({ ok: true, chat: room.chat, clientId });
     broadcastState(room);
     if (!returning) announce(room, `${name} joined`);
   });

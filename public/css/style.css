@@ -364,3 +364,5 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
   .volume, #timeDur { display: none; }
   .controls { gap: 4px; padding: 8px; }
 }
+
+.signed-in-as { font-size: 13px; color: var(--muted); }

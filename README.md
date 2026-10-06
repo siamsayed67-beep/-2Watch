@@ -19,37 +19,54 @@ npm start
 
 Open http://localhost:3000, create a room and send the invite link to your friends.
 
-## Setup Supabase (optional - for user accounts)
+## Accounts with Supabase (optional)
 
-If you want people to create accounts instead of just typing a name:
+With Supabase set up, people create an account (display name, email, password) and must sign in before they can create or join a room. Their display name comes from their account. Without Supabase, people join by typing a name.
 
-1. Go to [supabase.com](https://supabase.com) and create a free project
-2. In **Settings → API**, copy:
-   - `Project URL` → `SUPABASE_URL`
-   - `anon public` key → `SUPABASE_ANON_KEY`
-3. Create `.env` in this directory:
-   ```
-   SUPABASE_URL=your-url-here
-   SUPABASE_ANON_KEY=your-key-here
-   PORT=3000
-   MAX_UPLOAD_MB=4096
-   ROOM_IDLE_MINUTES=30
-   ```
-4. Restart the server
+1. Create a free project at [supabase.com](https://supabase.com).
+2. In **Settings → API**, copy the **Project URL** and the **anon public** key.
+3. Copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_ANON_KEY`.
+4. Restart the server.
 
-**Without Supabase:** 2Watch works fine. People just type a name to join.
+Supabase only stores the accounts. Rooms, chat and uploaded videos stay on the computer running the server.
 
-## Deploy to Vercel (everyone can access)
+**Email confirmation.** By default Supabase emails new users a confirmation link, and they can sign in only after clicking it. Its built-in email service only sends a few emails per hour. For a small group of friends, you can turn this off in **Authentication → Sign In / Providers → Email → Confirm email**.
 
-**See [VERCEL_DEPLOY.md](VERCEL_DEPLOY.md) for step-by-step instructions.**
+## Share it from your computer
 
-Quick version:
-1. Push to GitHub
-2. Connect to [vercel.com](https://vercel.com)
-3. Add Supabase credentials as environment variables
-4. Done! Vercel auto-deploys every time you push
+`npm run share` starts the server and a free [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/), then prints a public link such as `https://some-words.trycloudflare.com`. Send that link to your friends.
 
-**Cost:** Free (Vercel free tier + Supabase free tier)
+```bash
+npm run share
+```
+
+- The server and everything it stores stay on your computer. Cloudflare only relays the traffic, over HTTPS, and WebSockets work through it.
+- The link works only while that window is open and your computer is awake. Press `Ctrl+C` to stop sharing.
+- The link changes every time you run `npm run share`. A permanent address needs a domain on Cloudflare and a named tunnel.
+- Requires `cloudflared`. On Windows: `winget install --id Cloudflare.cloudflared`.
+- Uploads travel over your home internet connection, so your upload speed limits how many people can stream an uploaded file smoothly. YouTube and other links aren't affected, because each viewer loads those from the platform.
+
+## Run it on a server
+
+To keep 2Watch online without your computer, run it on any always-on machine that runs Node.js, such as a VPS (DigitalOcean, Hetzner, Linode, AWS Lightsail…) or a Node host that keeps the process running, like Render or Fly.io. It can't run on serverless hosts such as Vercel or Netlify (see [Architecture](#architecture)).
+
+On a Linux VPS:
+
+```bash
+git clone https://github.com/siamsayed67-beep/-2Watch.git 2watch
+cd 2watch
+npm install --omit=dev
+cp .env.example .env     # then fill in SUPABASE_URL and SUPABASE_ANON_KEY
+npm start                # listens on PORT (default 3000)
+```
+
+For real use:
+
+- **Keep it running** after you log out and after reboots, with a process manager such as `pm2` (`npm i -g pm2 && pm2 start server.js --name 2watch && pm2 save && pm2 startup`) or a systemd service.
+- **Serve it over HTTPS** behind a reverse proxy such as Caddy or nginx. The proxy must pass WebSocket connections through, and must allow large uploads (in nginx, set `client_max_body_size` at least as high as `MAX_UPLOAD_MB`). Twitch embeds and clipboard copying need HTTPS.
+- **Disk and bandwidth:** uploaded videos are stored in `uploads/` on the server and streamed to every viewer from it. Pick a plan with enough disk for your largest files and enough monthly traffic: one 2 GB video watched by 5 people uses about 10 GB.
+- **Supabase:** if you keep email confirmation on, set **Authentication → URL Configuration → Site URL** to your server's address, so confirmation links lead back to your site.
+- Restarting the server closes all rooms and clears `uploads/`.
 
 ## How the sync works
 
@@ -98,10 +115,12 @@ Each viewer's sync status is shown under the player ("In sync (±20 ms)").
 
 - **Frontend:** HTML/CSS/JavaScript + Socket.IO client
 - **Backend:** Node.js (Express.js) + Socket.IO server
-- **Hosting:** Vercel (full-stack Node.js)
-- **Video storage:** Ephemeral (temporary during streaming)
+- **Hosting:** any always-on Node.js machine: your own computer (shared through a Cloudflare tunnel) or a server
+- **Video storage:** the `uploads/` folder next to `server.js`, deleted when a video is replaced or its room closes
 - **User accounts:** Supabase (optional)
-- **Real-time sync:** WebSockets via Socket.IO ✅
+- **Real-time sync:** WebSockets via Socket.IO
+
+The server must keep running between requests, because rooms and the sync clock live in its memory and viewers keep a WebSocket open. That's why serverless hosts such as Vercel or Netlify can't run it.
 
 ## Environment variables
 
@@ -112,15 +131,15 @@ Each viewer's sync status is shown under the player ("In sync (±20 ms)").
 | `PORT` | `3000` | Port to listen on |
 | `MAX_UPLOAD_MB` | `4096` | Largest file someone can upload |
 | `ROOM_IDLE_MINUTES` | `30` | Empty rooms are deleted after this long |
+| `CLOUDFLARED_PATH` | (auto) | Path to `cloudflared.exe`, if `npm run share` can't find it |
 
-All environment variables go in `.env` (not committed to git). On Vercel, add them in the dashboard.
+All environment variables go in `.env`, which git ignores, so it's never uploaded to GitHub.
 
 ## Security
 
-- ✅ Supabase credentials are **never committed to git** (in .gitignore)
-- ✅ Only `.env.example` is pushed (template with placeholders)
-- ✅ Each deployment has its own isolated environment on Vercel
-- ✅ Rooms and chat are ephemeral (deleted when empty or server restarts)
+- `.env` holds your Supabase settings and is never committed. `.env.example` has placeholders only.
+- The Supabase anon key is sent to the browser, which is how Supabase is designed to work. It doesn't give access beyond what your Supabase project allows.
+- Rooms and chat live in memory and disappear when the server stops.
 
 ## License
 
