@@ -50,7 +50,18 @@ npm run share
 
 To keep 2Watch online without your computer, run it on any always-on machine that runs Node.js, such as a VPS (DigitalOcean, Hetzner, Linode, AWS Lightsail…) or a Node host that keeps the process running, like Render or Fly.io. It can't run on serverless hosts such as Vercel or Netlify (see [Architecture](#architecture)).
 
-On a Linux VPS:
+### On Render
+
+The repo includes a [`render.yaml`](render.yaml) Blueprint.
+
+1. Sign in at [render.com](https://render.com) with GitHub.
+2. Choose **New → Blueprint**, pick this repository, and click **Connect**.
+3. Enter `SUPABASE_URL` and `SUPABASE_ANON_KEY` when asked, then click **Apply**.
+4. When the deploy finishes, your site is at the `https://….onrender.com` address shown on the service page. Every push to `main` redeploys it.
+
+On the **free plan**, the service sleeps after 15 minutes without visitors. The next visit wakes it in about a minute, and sleeping clears any rooms and uploaded videos. Uploads are also cleared on every redeploy. A paid instance stays awake.
+
+### On a Linux VPS
 
 ```bash
 git clone https://github.com/siamsayed67-beep/-2Watch.git 2watch
