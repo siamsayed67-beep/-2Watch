@@ -39,17 +39,17 @@ If you want people to create accounts instead of just typing a name:
 
 **Without Supabase:** 2Watch works fine. People just type a name to join.
 
-## Deploy to Railway (everyone can access)
+## Deploy to Vercel (everyone can access)
 
-**See [DEPLOY.md](DEPLOY.md) for step-by-step instructions.**
+**See [VERCEL_DEPLOY.md](VERCEL_DEPLOY.md) for step-by-step instructions.**
 
 Quick version:
 1. Push to GitHub
-2. Connect to [railway.app](https://railway.app)
+2. Connect to [vercel.com](https://vercel.com)
 3. Add Supabase credentials as environment variables
-4. Done! Railway auto-deploys every time you push
+4. Done! Vercel auto-deploys every time you push
 
-**Cost:** $5/month on Railway + free Supabase tier
+**Cost:** Free (Vercel free tier + Supabase free tier)
 
 ## How the sync works
 
@@ -76,7 +76,7 @@ Each viewer's sync status is shown under the player ("In sync (±20 ms)").
 
 ## Uploads vs links
 
-- **Uploads** go to `uploads/`, served with HTTP range requests, so viewers can start anywhere in the file without downloading it all. A file is deleted when it's replaced, skipped or removed from the queue, or when its room closes. MP4 (H.264 + AAC) and WebM play in every browser. MKV/AVI or HEVC files may not play, because the server doesn't re-encode video.
+- **Uploads** go to temporary storage, served with HTTP range requests, so viewers can start anywhere in the file without downloading it all. A file is deleted when it's replaced, skipped or removed from the queue, or when its room closes. MP4 (H.264 + AAC) and WebM play in every browser. MKV/AVI or HEVC files may not play, because the server doesn't re-encode video.
 - **Links** are never fetched by the server. Each viewer's browser loads the official embedded player (YouTube IFrame API, Facebook embedded video player, Vimeo Player SDK, Twitch embed), and the sync engine controls it. This is also the only way that complies with these platforms' terms.
 
 ## Rooms and permissions
@@ -98,9 +98,10 @@ Each viewer's sync status is shown under the player ("In sync (±20 ms)").
 
 - **Frontend:** HTML/CSS/JavaScript + Socket.IO client
 - **Backend:** Node.js (Express.js) + Socket.IO server
-- **Video storage:** Local filesystem (`uploads/`)
+- **Hosting:** Vercel (full-stack Node.js)
+- **Video storage:** Ephemeral (temporary during streaming)
 - **User accounts:** Supabase (optional)
-- **Real-time sync:** WebSockets via Socket.IO
+- **Real-time sync:** WebSockets via Socket.IO ✅
 
 ## Environment variables
 
@@ -112,7 +113,14 @@ Each viewer's sync status is shown under the player ("In sync (±20 ms)").
 | `MAX_UPLOAD_MB` | `4096` | Largest file someone can upload |
 | `ROOM_IDLE_MINUTES` | `30` | Empty rooms are deleted after this long |
 
-All environment variables go in `.env` (not committed to git).
+All environment variables go in `.env` (not committed to git). On Vercel, add them in the dashboard.
+
+## Security
+
+- ✅ Supabase credentials are **never committed to git** (in .gitignore)
+- ✅ Only `.env.example` is pushed (template with placeholders)
+- ✅ Each deployment has its own isolated environment on Vercel
+- ✅ Rooms and chat are ephemeral (deleted when empty or server restarts)
 
 ## License
 
