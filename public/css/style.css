@@ -366,3 +366,11 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 }
 
 .signed-in-as { font-size: 13px; color: var(--muted); }
+
+.quality-pill {
+  margin-left: auto; font-size: 12px; color: var(--muted);
+  padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line);
+}
+.quality-pill.clickable { cursor: pointer; color: var(--text); border-color: var(--accent); }
+.quality-pill.clickable:hover { background: rgba(255, 77, 109, .12); }
+.quality-pill:not([hidden]) + .sync-pill { margin-left: 0; }

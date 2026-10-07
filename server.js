@@ -10,6 +10,7 @@ const express = require('express');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { parseMediaUrl, MEDIA_EXTENSIONS } = require('./lib/media');
+const transcode = require('./lib/transcode');
 
 // Supabase accounts are optional: without credentials, people join with just a name.
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -44,8 +45,16 @@ const HOST_GRACE_MS = 20000; // a host who refreshes the page keeps the host rol
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 
 // Rooms live in memory, so uploads left over from a previous run belong to nobody.
-fs.rmSync(UPLOAD_DIR, { recursive: true, force: true });
+// Clear the contents rather than the folder itself: on Windows the folder can't be removed
+// while it's open somewhere (e.g. in File Explorer), and that shouldn't stop the server.
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+for (const entry of fs.readdirSync(UPLOAD_DIR)) {
+  try {
+    fs.rmSync(path.join(UPLOAD_DIR, entry), { recursive: true, force: true, maxRetries: 3 });
+  } catch (err) {
+    console.warn(`Could not remove old upload ${entry}: ${err.code}`);
+  }
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -56,9 +65,6 @@ const io = new Server(server);
 
 app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-// Uploaded videos. express.static supports HTTP range requests, so viewers can seek
-// and start mid-file without downloading everything first.
-app.use('/media', express.static(UPLOAD_DIR, { maxAge: '1d', fallthrough: false }));
 app.get('/room/:id', (req, res) => res.sendFile(path.join(__dirname, 'public', 'room.html')));
 
 /* ------------------------------------------------------------------ rooms */
@@ -101,7 +107,7 @@ function createRoom(name) {
 
 function destroyRoom(room) {
   clearTimeout(room.hostTimer);
-  for (const file of room.files) fs.unlink(path.join(UPLOAD_DIR, file), () => {});
+  for (const file of room.files) removeUploadFiles(file);
   for (const up of pendingUploads.values()) if (up.roomId === room.id) discardUpload(up);
   rooms.delete(room.id);
 }
@@ -154,9 +160,141 @@ const announce = (room, text) => addChat(room, { system: true, text });
 function deleteFileIfUnused(room, item) {
   if (item?.kind !== 'file') return;
   if (room.media?.id === item.id || room.queue.some((q) => q.id === item.id)) return;
-  fs.unlink(path.join(UPLOAD_DIR, item.file), () => {});
+  removeUploadFiles(item.file);
   room.files.delete(item.file);
 }
+
+/* ------------------------------------------------- adaptive (smooth) playback */
+
+/*
+ * After an upload, FFmpeg makes lower-quality copies cut into 4-second segments (HLS).
+ * Viewers whose connection can't keep up with the original switch to these, and their
+ * player picks the best quality their connection can sustain. One video is encoded at a
+ * time, the one that's playing first.
+ */
+const encodeQueue = []; // { roomId, item }
+let encoding = null; // { roomId, item, job }
+
+const hlsDirName = (file) => path.parse(file).name + '_hls';
+
+function removeUploadFiles(file) {
+  cancelEncode(file);
+  hlsOutputs.delete(hlsDirName(file));
+  fs.unlink(path.join(UPLOAD_DIR, file), () => {});
+  fs.rm(path.join(UPLOAD_DIR, hlsDirName(file)), { recursive: true, force: true }, () => {});
+}
+
+function cancelEncode(file) {
+  const i = encodeQueue.findIndex((j) => j.item.file === file);
+  if (i >= 0) encodeQueue.splice(i, 1);
+  if (encoding?.item.file === file) encoding.job.cancel();
+}
+
+function queueEncode(room, item) {
+  if (!transcode.available) return;
+  item.adaptive = { status: 'queued' };
+  encodeQueue.push({ roomId: room.id, item });
+  pumpEncodes();
+}
+
+function pumpEncodes() {
+  if (encoding || !encodeQueue.length) return;
+  let i = encodeQueue.findIndex((j) => rooms.get(j.roomId)?.media?.id === j.item.id);
+  if (i < 0) i = 0;
+  const [{ roomId, item }] = encodeQueue.splice(i, 1);
+  const room = rooms.get(roomId);
+  if (!room) return pumpEncodes();
+
+  const dir = hlsDirName(item.file);
+  let job;
+  try {
+    job = transcode.encodeHls(path.join(UPLOAD_DIR, item.file), path.join(UPLOAD_DIR, dir), ({ fraction, seconds }) => {
+      item.adaptive.progress = fraction;
+      item.adaptive.encodedUntil = seconds;
+      hls.encodedUntil = seconds;
+      // Viewers can switch once the first few segments exist; encoding stays ahead of playback.
+      const becamePlayable = !item.adaptiveSrc && seconds >= transcode.SEGMENT_SECONDS * 3;
+      if (becamePlayable) item.adaptiveSrc = `/media/${dir}/master.m3u8`;
+      if ((becamePlayable || fraction - lastSent >= 0.05) && rooms.has(roomId)) {
+        lastSent = fraction;
+        broadcastState(room);
+      }
+    });
+  } catch (err) {
+    console.error(`Could not prepare smooth playback for "${item.title}":`, err.message);
+    item.adaptive = { status: 'failed' };
+    broadcastState(room);
+    return pumpEncodes();
+  }
+  const hls = { info: job.info, done: false, encodedUntil: 0 };
+  hlsOutputs.set(dir, hls);
+  item.adaptive = { status: 'encoding', progress: 0, qualities: job.info.variants.map((v) => v.name) };
+  broadcastState(room);
+  let lastSent = 0;
+  encoding = { roomId, item, job };
+  job.promise
+    .then(() => {
+      hls.done = true;
+      item.adaptive = { status: 'ready', qualities: job.info.variants.map((v) => v.name) };
+      item.adaptiveSrc = `/media/${dir}/master.m3u8`;
+    })
+    .catch((err) => {
+      hlsOutputs.delete(dir);
+      if (err.message === 'cancelled') return;
+      delete item.adaptiveSrc;
+      console.error(`Could not prepare smooth playback for "${item.title}":`, err.message);
+      item.adaptive = { status: 'failed' };
+    })
+    .finally(() => {
+      encoding = null;
+      if (rooms.has(roomId)) broadcastState(room);
+      pumpEncodes();
+    });
+}
+
+// Smooth-mode files. The playlists are generated here (see lib/transcode.js), and a segment
+// that's still being encoded is held back until it's complete.
+const hlsOutputs = new Map(); // folder name -> { info, done, encodedUntil }
+const HLS_DIR = '[0-9a-f]{32}_hls';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+app.get(new RegExp(`^/media/(${HLS_DIR})/master\\.m3u8$`), (req, res) => {
+  const hls = hlsOutputs.get(req.params[0]);
+  if (!hls) return res.sendStatus(404);
+  res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-cache').send(transcode.masterPlaylist(hls.info));
+});
+
+app.get(new RegExp(`^/media/(${HLS_DIR})/(\\d{3,4}p)/index\\.m3u8$`), (req, res) => {
+  const hls = hlsOutputs.get(req.params[0]);
+  if (!hls || !hls.info.variants.some((v) => v.name === req.params[1])) return res.sendStatus(404);
+  res.type('application/vnd.apple.mpegurl').set('Cache-Control', 'no-cache').send(transcode.variantPlaylist(hls.info));
+});
+
+app.get(new RegExp(`^/media/(${HLS_DIR})/(\\d{3,4}p)/s(\\d{5})\\.ts$`), async (req, res) => {
+  const { 0: dir, 1: quality, 2: num } = req.params;
+  const hls = hlsOutputs.get(dir);
+  if (!hls || !hls.info.variants.some((v) => v.name === quality)) return res.sendStatus(404);
+  const index = Number(num);
+  if (index >= hls.info.segments) return res.sendStatus(404);
+  const file = path.join(UPLOAD_DIR, dir, quality, `s${num}.ts`);
+  // A segment is complete once FFmpeg has started the next one (or finished everything).
+  const next = path.join(UPLOAD_DIR, dir, quality, `s${String(index + 1).padStart(5, '0')}.ts`);
+  const ready = () => hls.done || fs.existsSync(next);
+  for (let waited = 0; !ready(); waited += 250) {
+    if (waited >= 15000 || !hlsOutputs.has(dir) || req.socket.destroyed) {
+      return res.status(503).set('Retry-After', '2').send('Not encoded yet');
+    }
+    await sleep(250);
+  }
+  res.type('video/mp2t').set('Cache-Control', 'public, max-age=86400').sendFile(file, (err) => {
+    if (err && !res.headersSent) res.sendStatus(404);
+  });
+});
+
+// Original uploaded videos. express.static supports HTTP range requests, so viewers can seek
+// and start mid-file without downloading everything first. (Registered after the smooth-mode
+// routes above, so those take priority.)
+app.use('/media', express.static(UPLOAD_DIR, { maxAge: '1d', fallthrough: false }));
 
 function loadMedia(room, item) {
   const previous = room.media;
@@ -278,9 +416,11 @@ app.post('/api/rooms/:id/uploads', async (req, res) => {
     return res.status(413).json({ error: `That file is too large (max ${MAX_UPLOAD_MB} MB).` });
   }
   // Leave room for uploads already in progress, plus a safety margin.
+  // The smooth-playback copies take roughly twice the original's size again.
+  const needed = transcode.available ? size * 3 : size;
   let reserved = 512 * 1024 * 1024;
   for (const up of pendingUploads.values()) reserved += up.size - up.received;
-  if (size + reserved > (await freeDiskBytes())) {
+  if (needed + reserved > (await freeDiskBytes())) {
     return res.status(507).json({ error: 'There is not enough free space on the server for this file.' });
   }
 
@@ -356,6 +496,7 @@ app.post('/api/uploads/:uploadId/complete', (req, res) => {
   room.files.add(up.file);
   const item = { id: randomId(10), kind: 'file', file: up.file, src: `/media/${up.file}`, title: up.title, duration: null, addedBy: up.name };
   playNowOrQueue(room, item, req.body?.mode, up.name);
+  queueEncode(room, item);
   res.json({ ok: true });
 });
 

@@ -104,21 +104,55 @@ window.Players = (() => {
       });
       v.addEventListener('error', () => {
         const msg = html5ErrorMessage(v.error);
-        fail(new Error(msg));
-        ev.onError(msg);
+        // code 4: the browser can't decode this format (e.g. HEVC or MKV)
+        const unsupported = v.error?.code === 4;
+        fail(Object.assign(new Error(msg), { unsupported }));
+        ev.onError(msg, { unsupported });
       });
 
       const isHls = media.hls || /\.m3u8(\?|$)/i.test(media.src);
       const attach = () => {
-        if (isHls && !v.canPlayType('application/vnd.apple.mpegurl')) {
-          return loadScript('https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js').then(() => {
-            if (!window.Hls?.isSupported()) throw new Error("This browser can't play HLS streams.");
-            this.hls = new Hls();
+        // Prefer hls.js wherever it runs: it gives control over buffering and picks the quality
+        // to suit the connection. Newer Chrome versions also claim native HLS support, but
+        // without those controls. Native playback is only the fallback (iPhone Safari).
+        if (isHls) {
+          return loadScript('https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js').catch(() => null).then(() => {
+            if (!window.Hls?.isSupported()) {
+              if (!v.canPlayType('application/vnd.apple.mpegurl')) throw new Error("This browser can't play HLS streams.");
+              v.src = media.src;
+              return;
+            }
+            this.hls = new Hls({
+              // Keep 1-2 minutes loaded ahead, so short slowdowns in the connection go unnoticed.
+              maxBufferLength: 60,
+              maxMaxBufferLength: 120,
+              backBufferLength: 30,
+              // Start loading where the room is, not at the beginning.
+              startPosition: media.startAt ?? -1,
+              // Measure the connection on the lowest quality first, instead of starting at the
+              // top quality, which would stall right away for the slow viewers smooth mode is for.
+              startLevel: -1,
+              // Pick a quality with headroom (default: 95% / 70% of the measured speed). A
+              // quality that only just fits keeps stalling on real home connections.
+              abrBandWidthFactor: 0.8,
+              abrBandWidthUpFactor: 0.6,
+            });
+            let netRetries = 0;
+            let mediaRetries = 0;
             this.hls.on(Hls.Events.ERROR, (e, data) => {
-              if (data.fatal) {
+              if (!data.fatal) return; // hls.js retries these by itself
+              if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetries++ < 5) {
+                setTimeout(() => this.hls?.startLoad(), 2000);
+              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetries++ < 2) {
+                this.hls.recoverMediaError();
+              } else {
                 fail(new Error('The stream could not be loaded.'));
                 ev.onError('The stream could not be loaded.');
               }
+            });
+            this.hls.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
+              const level = this.hls.levels[data.level];
+              if (level?.height) ev.onQuality?.(`${level.height}p`);
             });
             this.hls.loadSource(media.src);
             this.hls.attachMedia(v);
@@ -135,6 +169,12 @@ window.Players = (() => {
     getTime() { return this.video.currentTime; }
     getDuration() { return Number.isFinite(this.video.duration) ? this.video.duration : 0; }
     isPaused() { return this.video.paused; }
+    /** True if the moment t (seconds) is already downloaded, so jumping there won't cause a pause. */
+    isBuffered(t) {
+      const b = this.video.buffered;
+      for (let i = 0; i < b.length; i++) if (b.start(i) <= t && t <= b.end(i) - 0.5) return true;
+      return false;
+    }
     setRate(r) { if (Math.abs(this.video.playbackRate - r) > 0.005) this.video.playbackRate = r; }
     setVolume(v) { this.video.volume = v; }
     setMuted(m) { this.video.muted = m; }

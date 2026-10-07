@@ -54,6 +54,16 @@
 
   const overlay = { error: null, blocked: false, countdown: 0, loading: null, buffering: false };
 
+  // Smooth mode: the server makes lower-quality copies of uploads (HLS). Viewers whose connection
+  // can't keep up with the original are switched to them, and their player picks the best
+  // quality the connection can sustain.
+  let adaptiveMounted = false; // the current upload is playing in smooth mode
+  const wantAdaptive = new Set(); // uploads this viewer should watch in smooth mode
+  let stallTimes = []; // when the video recently paused to load
+  let bufferingSince = 0;
+  let quality = null; // current smooth-mode quality, e.g. "480p"
+  let waitingForCompatible = false; // the browser can't play the original; waiting for the converted copy
+
   const isHost = () => state?.hostId === clientId;
   const canControl = () => !!state && (state.everyoneCanControl || isHost());
 
@@ -217,11 +227,84 @@
     renderQueue();
     renderNowPlaying();
     renderControls();
-    if ((s.media?.id ?? null) !== mountedId) mountMedia(s.media);
+    const m = s.media;
+    if ((m?.id ?? null) !== mountedId) mountMedia(m);
+    else if (smoothReady(m) && wantAdaptive.has(m.id) && !adaptiveMounted) switchToAdaptive();
+    else if (waitingForCompatible) showIncompatible(m);
+    renderQuality();
     syncTick();
   }
 
+  // Smooth mode is usable once encoding is done, or far enough ahead of the room that the
+  // viewer won't catch up with it (it normally runs several times faster than playback).
+  function smoothReady(m) {
+    if (!m?.adaptiveSrc) return false;
+    return m.adaptive?.status === 'ready' || (m.adaptive?.encodedUntil ?? 0) > Math.max(0, targetTime()) + 20;
+  }
+
+  function switchToAdaptive(reason) {
+    const m = state?.media;
+    if (!smoothReady(m) || adaptiveMounted) return;
+    wantAdaptive.add(m.id);
+    if (reason) toast(reason);
+    mountMedia(m);
+  }
+
+  // Whether this viewer keeps pausing to load, i.e. their connection is slower than the video.
+  function isStruggling() {
+    const now = performance.now();
+    stallTimes = stallTimes.filter((t) => now - t < 60000);
+    return stallTimes.length >= 2 || (bufferingSince && now - bufferingSince > 3000);
+  }
+
+  function checkSmoothMode() {
+    const m = state?.media;
+    if (m?.kind !== 'file' || adaptiveMounted || !isStruggling()) return;
+    if (smoothReady(m)) {
+      switchToAdaptive("Your connection is slower than this video needs, so you're now in smooth mode: the quality adjusts to your connection.");
+    } else {
+      wantAdaptive.add(m.id); // switch as soon as the copies are ready
+    }
+  }
+
+  function showIncompatible(m) {
+    const a = m?.adaptive;
+    overlay.error = !a
+      ? "Your browser can't play this file's format. Ask the uploader for an MP4 (H.264) version."
+      : a.status === 'failed'
+        ? "Your browser can't play this file's format, and it couldn't be converted."
+        : `Your browser can't play this file's format. A compatible version is being prepared${a.status === 'encoding' ? ` (${Math.round((a.progress || 0) * 100)}%)` : ''} and will start automatically.`;
+    renderOverlay();
+  }
+
+  function renderQuality() {
+    const pill = $('qualityPill');
+    const m = state?.media;
+    pill.onclick = null;
+    pill.classList.remove('clickable');
+    let text = '';
+    if (m?.kind === 'file') {
+      if (adaptiveMounted) text = `Smooth mode · ${quality || 'auto'}`;
+      else if (smoothReady(m)) {
+        text = 'Lagging? Use smooth mode';
+        pill.classList.add('clickable');
+        pill.onclick = () => switchToAdaptive();
+      } else if (m.adaptive?.status === 'encoding') text = `Preparing smooth mode ${Math.round((m.adaptive.progress || 0) * 100)}%`;
+      else if (m.adaptive?.status === 'queued') text = 'Smooth mode queued';
+    }
+    pill.textContent = text;
+    pill.hidden = !text;
+  }
+
   function mountMedia(media) {
+    // Smooth mode starts loading at the room's current moment instead of the beginning.
+    const useAdaptive = !!(media?.kind === 'file' && smoothReady(media) && wantAdaptive.has(media.id));
+    const source = useAdaptive ? { ...media, src: media.adaptiveSrc, hls: true, startAt: Math.max(0, targetTime()) } : media;
+    adaptiveMounted = useAdaptive;
+    quality = null;
+    stallTimes = [];
+    bufferingSince = 0;
+    waitingForCompatible = false;
     if (adapter) {
       try { adapter.destroy(); } catch {}
     }
@@ -241,17 +324,38 @@
     let a;
     try {
       const Adapter = Players.adapterFor(media.kind);
-      a = new Adapter($('stageMedia'), media, {
+      a = new Adapter($('stageMedia'), source, {
         onMeta: (meta) => adapter === a && socket.emit('media:meta', { mediaId: media.id, ...meta }),
-        onError: (msg) => {
+        onError: (msg, info) => {
           if (adapter !== a) return;
+          // The browser can't decode this format (e.g. HEVC/MKV): use the converted copy instead.
+          if (info?.unsupported && media.kind === 'file' && !useAdaptive) {
+            wantAdaptive.add(media.id);
+            if (smoothReady(state?.media)) return switchToAdaptive();
+            waitingForCompatible = true;
+            overlay.loading = null;
+            return showIncompatible(state?.media);
+          }
           overlay.error = msg;
           renderOverlay();
         },
         onBuffering: (b) => {
           if (adapter !== a) return;
           overlay.buffering = b;
+          const now = performance.now();
+          if (b) {
+            bufferingSince = now;
+            if (adapterReady && playback?.playing && targetTime() > 1) stallTimes.push(now);
+          } else {
+            bufferingSince = 0;
+          }
           renderOverlay();
+          checkSmoothMode();
+        },
+        onQuality: (label) => {
+          if (adapter !== a) return;
+          quality = label;
+          renderQuality();
         },
       });
     } catch (err) {
@@ -273,11 +377,12 @@
         syncTick();
       })
       .catch((err) => {
-        if (adapter !== a) return;
+        if (adapter !== a || err?.unsupported) return; // unsupported formats are handled in onError
         overlay.loading = null;
         overlay.error = err?.message || 'This video could not be loaded.';
         renderOverlay();
       });
+    renderQuality();
   }
 
   /* ------------------------------------------------------------ sync engine */
@@ -347,6 +452,7 @@
       lastDrift = null;
       return;
     }
+    checkSmoothMode();
     const drift = current - target;
     lastDrift = drift;
     // Embeds take a moment to resume after a jump. Learn how long, so the next jump lands on target.
@@ -355,11 +461,17 @@
       leadCheckAt = 0;
     }
     if (Math.abs(drift) > a.hardSyncThreshold) {
-      if (now - lastSeekAt > 2500) {
+      // Jumping to a moment that hasn't downloaded yet only causes another pause. So while the
+      // video is loading, don't jump; jump straight away only if the target is already loaded;
+      // otherwise catch up by playing slightly faster and jump only if that isn't enough.
+      const targetLoaded = a.isBuffered ? a.isBuffered(target) : true;
+      if (!overlay.buffering && now - lastSeekAt > (targetLoaded ? 2500 : 10000)) {
         a.seek(target + a.seekLead);
         lastSeekAt = now;
         if (a.canRate) a.setRate(1);
         else leadCheckAt = now;
+      } else if (a.canRate) {
+        a.setRate(clamp(1 - drift * 0.6, 0.9, 1.1));
       }
     } else if (a.canRate) {
       a.setRate(Math.abs(drift) < 0.04 ? 1 : clamp(1 - drift * 0.6, 0.9, 1.1));
