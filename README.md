@@ -74,7 +74,7 @@ npm start                # listens on PORT (default 3000)
 For real use:
 
 - **Keep it running** after you log out and after reboots, with a process manager such as `pm2` (`npm i -g pm2 && pm2 start server.js --name 2watch && pm2 save && pm2 startup`) or a systemd service.
-- **Serve it over HTTPS** behind a reverse proxy such as Caddy or nginx. The proxy must pass WebSocket connections through, and must allow large uploads (in nginx, set `client_max_body_size` at least as high as `MAX_UPLOAD_MB`). Twitch embeds and clipboard copying need HTTPS.
+- **Serve it over HTTPS** behind a reverse proxy such as Caddy or nginx. The proxy must pass WebSocket connections through, and must allow request bodies of at least 9 MB, because uploads arrive in 8 MB pieces (in nginx: `client_max_body_size 10m;`). Twitch embeds and clipboard copying need HTTPS.
 - **Disk and bandwidth:** uploaded videos are stored in `uploads/` on the server and streamed to every viewer from it. Pick a plan with enough disk for your largest files and enough monthly traffic: one 2 GB video watched by 5 people uses about 10 GB.
 - **Supabase:** if you keep email confirmation on, set **Authentication → URL Configuration → Site URL** to your server's address, so confirmation links lead back to your site.
 - Restarting the server closes all rooms and clears `uploads/`.
@@ -140,7 +140,7 @@ The server must keep running between requests, because rooms and the sync clock 
 | `SUPABASE_URL` | (unset) | Supabase project URL (optional) |
 | `SUPABASE_ANON_KEY` | (unset) | Supabase anon public key (optional) |
 | `PORT` | `3000` | Port to listen on |
-| `MAX_UPLOAD_MB` | `4096` | Largest file someone can upload |
+| `MAX_UPLOAD_MB` | `16384` | Largest file someone can upload, in MB (16 GB) |
 | `ROOM_IDLE_MINUTES` | `30` | Empty rooms are deleted after this long |
 | `CLOUDFLARED_PATH` | (auto) | Path to `cloudflared.exe`, if `npm run share` can't find it |
 

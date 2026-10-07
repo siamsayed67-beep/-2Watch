@@ -7,7 +7,6 @@ const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
-const multer = require('multer');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { parseMediaUrl, MEDIA_EXTENSIONS } = require('./lib/media');
@@ -36,7 +35,9 @@ async function verifyToken(token) {
 const bearer = (req) => req.get('authorization')?.replace(/^Bearer\s+/i, '');
 
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 4096;
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 16384;
+const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024; // uploads are sent in pieces of this size
+const UPLOAD_IDLE_MS = 30 * 60 * 1000; // an upload with no new piece for this long is discarded
 const ROOM_IDLE_MINUTES = Number(process.env.ROOM_IDLE_MINUTES) || 30;
 const START_DELAY_MS = 1500; // every new video starts this long after it's loaded, so all viewers start together
 const HOST_GRACE_MS = 20000; // a host who refreshes the page keeps the host role
@@ -48,6 +49,9 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const app = express();
 const server = http.createServer(app);
+// Node cuts off any request after 5 minutes by default. Upload pieces are small, but on a
+// very slow connection one piece can take longer than that.
+server.requestTimeout = 15 * 60 * 1000;
 const io = new Server(server);
 
 app.use(express.json({ limit: '10kb' }));
@@ -98,6 +102,7 @@ function createRoom(name) {
 function destroyRoom(room) {
   clearTimeout(room.hostTimer);
   for (const file of room.files) fs.unlink(path.join(UPLOAD_DIR, file), () => {});
+  for (const up of pendingUploads.values()) if (up.roomId === room.id) discardUpload(up);
   rooms.delete(room.id);
 }
 
@@ -227,25 +232,29 @@ function safeExt(name) {
   return /^\.[a-z0-9]{1,5}$/.test(ext) ? ext : '';
 }
 
-function decodeFilename(name) {
-  // Multipart filenames arrive as latin1; most browsers actually send UTF-8.
-  const utf8 = Buffer.from(name, 'latin1').toString('utf8');
-  return utf8.includes('�') ? name : utf8;
+/*
+ * Chunked, resumable uploads. A video is sent as a series of small pieces instead of one
+ * huge request, so a long upload isn't cut off by request time limits (Node's own is
+ * 5 minutes) or proxy size limits, and a dropped connection only costs one piece, which
+ * the browser retries. The upload id acts as the uploader's key for the later pieces.
+ */
+const pendingUploads = new Map(); // uploadId -> { id, roomId, clientId, name, title, size, file, path, received, busy, lastActivity }
+
+function discardUpload(up) {
+  pendingUploads.delete(up.id);
+  fs.unlink(up.path, () => {});
 }
 
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (req, file, cb) => cb(null, crypto.randomBytes(16).toString('hex') + safeExt(file.originalname)),
-  }),
-  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024, files: 1 },
-  fileFilter: (req, file, cb) => {
-    if (/^(video|audio)\//.test(file.mimetype) || MEDIA_EXTENSIONS.test(file.originalname)) return cb(null, true);
-    cb(Object.assign(new Error('Only video or audio files can be uploaded.'), { status: 415 }));
-  },
-});
+async function freeDiskBytes() {
+  try {
+    const st = await fs.promises.statfs(UPLOAD_DIR);
+    return st.bavail * st.bsize;
+  } catch {
+    return Infinity; // can't tell; let the write fail later if the disk really is full
+  }
+}
 
-app.post('/api/rooms/:id/upload', async (req, res) => {
+app.post('/api/rooms/:id/uploads', async (req, res) => {
   const room = rooms.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
   let clientId = req.get('x-client-id');
@@ -258,29 +267,102 @@ app.post('/api/rooms/:id/upload', async (req, res) => {
   if (!name) return res.status(403).json({ error: 'Join the room before uploading.' });
   if (!canControl(room, clientId)) return res.status(403).json({ error: 'Only the host can add videos in this room.' });
 
-  upload.single('video')(req, res, (err) => {
-    if (err) {
-      const msg = err.code === 'LIMIT_FILE_SIZE' ? `That file is too large (max ${MAX_UPLOAD_MB} MB).` : err.message;
-      return res.status(err.status || 400).json({ error: msg });
+  const fileName = clean(req.body?.name, 200);
+  const type = String(req.body?.type ?? '');
+  const size = Number(req.body?.size);
+  if (!fileName || !(/^(video|audio)\//.test(type) || MEDIA_EXTENSIONS.test(fileName))) {
+    return res.status(415).json({ error: 'Only video or audio files can be uploaded.' });
+  }
+  if (!Number.isSafeInteger(size) || size <= 0) return res.status(400).json({ error: 'That file is empty.' });
+  if (size > MAX_UPLOAD_MB * 1024 * 1024) {
+    return res.status(413).json({ error: `That file is too large (max ${MAX_UPLOAD_MB} MB).` });
+  }
+  // Leave room for uploads already in progress, plus a safety margin.
+  let reserved = 512 * 1024 * 1024;
+  for (const up of pendingUploads.values()) reserved += up.size - up.received;
+  if (size + reserved > (await freeDiskBytes())) {
+    return res.status(507).json({ error: 'There is not enough free space on the server for this file.' });
+  }
+
+  const file = crypto.randomBytes(16).toString('hex') + safeExt(fileName);
+  const up = {
+    id: crypto.randomBytes(16).toString('hex'),
+    roomId: room.id,
+    clientId,
+    name,
+    title: clean(fileName, 120, 'Uploaded video'),
+    size,
+    file,
+    path: path.join(UPLOAD_DIR, file),
+    received: 0,
+    busy: false,
+    lastActivity: Date.now(),
+  };
+  await fs.promises.writeFile(up.path, '');
+  pendingUploads.set(up.id, up);
+  res.json({ uploadId: up.id, chunkSize: UPLOAD_CHUNK_BYTES });
+});
+
+const missingUpload = (res) =>
+  res.status(404).json({ error: 'This upload expired or was cancelled. Please upload the file again.' });
+
+app.put(
+  '/api/uploads/:uploadId',
+  express.raw({ type: 'application/octet-stream', limit: UPLOAD_CHUNK_BYTES + 1024 }),
+  async (req, res) => {
+    const up = pendingUploads.get(req.params.uploadId);
+    if (!up) return missingUpload(res);
+    const offset = Number(req.query.offset);
+    // A retried piece the server already has, or a piece out of order: tell the browser
+    // where to continue from instead of failing.
+    if (up.busy || offset !== up.received) return res.status(409).json({ received: up.received });
+    const chunk = req.body;
+    if (!Buffer.isBuffer(chunk) || chunk.length === 0 || offset + chunk.length > up.size) {
+      return res.status(400).json({ error: 'Received an invalid piece of the file.' });
     }
-    if (!req.file) return res.status(400).json({ error: 'No file was received.' });
-    if (!rooms.has(room.id)) {
-      fs.unlink(req.file.path, () => {});
-      return res.status(410).json({ error: 'The room has closed.' });
+    up.busy = true;
+    try {
+      await fs.promises.appendFile(up.path, chunk);
+      up.received += chunk.length;
+      up.lastActivity = Date.now();
+      res.json({ received: up.received });
+    } catch (err) {
+      // Undo a partly written piece so the next retry starts from a clean point.
+      await fs.promises.truncate(up.path, up.received).catch(() => {});
+      const full = err.code === 'ENOSPC';
+      res.status(full ? 507 : 500).json({ error: full ? 'The server ran out of disk space.' : 'Could not save part of the file.' });
+    } finally {
+      up.busy = false;
     }
-    room.files.add(req.file.filename);
-    const item = {
-      id: randomId(10),
-      kind: 'file',
-      file: req.file.filename,
-      src: `/media/${req.file.filename}`,
-      title: clean(decodeFilename(req.file.originalname), 120, 'Uploaded video'),
-      duration: null,
-      addedBy: name,
-    };
-    playNowOrQueue(room, item, req.query.mode, name);
-    res.json({ ok: true });
-  });
+  },
+);
+
+app.post('/api/uploads/:uploadId/complete', (req, res) => {
+  const up = pendingUploads.get(req.params.uploadId);
+  if (!up) return missingUpload(res);
+  if (up.busy || up.received !== up.size) {
+    return res.status(409).json({ error: 'The upload is not finished yet.', received: up.received });
+  }
+  const room = rooms.get(up.roomId);
+  if (!room) {
+    discardUpload(up);
+    return res.status(410).json({ error: 'The room has closed.' });
+  }
+  if (!canControl(room, up.clientId)) {
+    discardUpload(up);
+    return res.status(403).json({ error: 'Only the host can add videos in this room.' });
+  }
+  pendingUploads.delete(up.id);
+  room.files.add(up.file);
+  const item = { id: randomId(10), kind: 'file', file: up.file, src: `/media/${up.file}`, title: up.title, duration: null, addedBy: up.name };
+  playNowOrQueue(room, item, req.body?.mode, up.name);
+  res.json({ ok: true });
+});
+
+app.delete('/api/uploads/:uploadId', (req, res) => {
+  const up = pendingUploads.get(req.params.uploadId);
+  if (up) discardUpload(up);
+  res.json({ ok: true });
 });
 
 /* ------------------------------------------------------------- realtime */
@@ -482,6 +564,9 @@ setInterval(() => {
     if (room.members.size === 0 && room.emptySince && now - room.emptySince > ROOM_IDLE_MINUTES * 60000) {
       destroyRoom(room);
     }
+  }
+  for (const up of pendingUploads.values()) {
+    if (!up.busy && now - up.lastActivity > UPLOAD_IDLE_MS) discardUpload(up);
   }
 }, 1000);
 

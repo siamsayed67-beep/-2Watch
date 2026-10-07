@@ -700,17 +700,66 @@
 
   $('uploadNow').onclick = () => startUpload('now');
   $('uploadQueue').onclick = () => startUpload('queue');
-  $('uploadCancel').onclick = () => currentUpload?.abort();
+  $('uploadCancel').onclick = () => {
+    if (!currentUpload) return;
+    currentUpload.cancelled = true;
+    currentUpload.xhr?.abort();
+  };
+
+  // Leaving the page would stop an upload, so ask first.
+  window.addEventListener('beforeunload', (e) => {
+    if (!currentUpload) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  const UPLOAD_MAX_RETRIES = 12;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const CANCELLED = new Error('Upload cancelled.');
+
+  async function uploadApi(method, url, body) {
+    const headers = { 'Content-Type': 'application/json', 'X-Client-Id': clientId };
+    const token = await accessToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(data.error || `Upload failed (${res.status}).`), { status: res.status });
+    return data;
+  }
+
+  /** Sends one piece of the file. Rejects with { status, body }, { status: 0 } for network errors, or { aborted }. */
+  function sendPiece(upload, url, blob, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = (upload.xhr = new XMLHttpRequest());
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.upload.onprogress = (e) => onProgress(e.loaded);
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status < 400) resolve(body);
+        else reject({ status: xhr.status, body });
+      };
+      xhr.onerror = () => reject({ status: 0 });
+      xhr.onabort = () => reject({ aborted: true });
+      xhr.send(blob);
+    });
+  }
+
+  // Network drops, timeouts and overloaded proxies are worth retrying; anything else is a real error.
+  const isRetryable = (status) => status === 0 || status === 408 || status === 429 || (status >= 500 && status !== 507);
+
+  function fmtDuration(sec) {
+    if (!Number.isFinite(sec)) return '';
+    if (sec < 60) return 'less than a minute left';
+    const m = Math.round(sec / 60);
+    return m < 60 ? `about ${m} min left` : `about ${Math.floor(m / 60)} h ${m % 60} min left`;
+  }
 
   async function startUpload(mode) {
     if (!selectedFile || currentUpload) return;
-    const xhr = (currentUpload = new XMLHttpRequest());
-    const fd = new FormData();
-    fd.append('video', selectedFile);
-    xhr.open('POST', `/api/rooms/${encodeURIComponent(roomId)}/upload?mode=${mode}`);
-    xhr.setRequestHeader('X-Client-Id', clientId);
-    const token = await accessToken();
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    const file = selectedFile;
+    const upload = (currentUpload = { cancelled: false, xhr: null, id: null });
 
     $('uploadProgress').hidden = false;
     $('uploadNow').hidden = $('uploadQueue').hidden = true;
@@ -718,34 +767,82 @@
       $('uploadBar').style.width = pct + '%';
       $('uploadText').textContent = text;
     };
-    setProgress(0, '0%');
-    const started = performance.now();
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const pct = (e.loaded / e.total) * 100;
-      const mbps = e.loaded / 1024 / 1024 / ((performance.now() - started) / 1000);
-      setProgress(pct, pct >= 100 ? 'Processing…' : `${pct.toFixed(0)}% · ${mbps.toFixed(1)} MB/s`);
-    };
-    const done = (msg) => {
-      currentUpload = null;
-      $('uploadProgress').hidden = true;
-      $('uploadNow').hidden = $('uploadQueue').hidden = false;
-      if (msg) toast(msg);
-    };
-    xhr.onload = () => {
-      let res = {};
-      try { res = JSON.parse(xhr.responseText); } catch {}
-      if (xhr.status >= 400) return done(res.error || `Upload failed (${xhr.status}).`);
+    setProgress(0, 'Starting…');
+
+    try {
+      const { uploadId, chunkSize } = await uploadApi('POST', `/api/rooms/${encodeURIComponent(roomId)}/uploads`, {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      });
+      upload.id = uploadId;
+
+      let offset = 0;
+      let failures = 0;
+      const started = performance.now();
+      const report = (sent) => {
+        const secs = (performance.now() - started) / 1000;
+        const rate = secs > 1 ? sent / secs : 0;
+        const pct = (sent / file.size) * 100;
+        const eta = rate > 0 ? fmtDuration((file.size - sent) / rate) : '';
+        setProgress(pct, `${pct.toFixed(0)}%${rate ? ` · ${(rate / 1048576).toFixed(1)} MB/s` : ''}${eta ? ` · ${eta}` : ''}`);
+      };
+
+      while (offset < file.size) {
+        if (upload.cancelled) throw CANCELLED;
+        const piece = file.slice(offset, offset + chunkSize);
+        try {
+          const res = await sendPiece(upload, `/api/uploads/${uploadId}?offset=${offset}`, piece, (loaded) => report(offset + loaded));
+          offset = res.received;
+          failures = 0;
+          report(offset);
+        } catch (err) {
+          if (err.aborted || upload.cancelled) throw CANCELLED;
+          // The server is ahead or behind us (e.g. it saved a piece whose reply got lost): continue from its position.
+          if (err.status === 409 && Number.isFinite(err.body?.received)) {
+            offset = err.body.received;
+            continue;
+          }
+          if (!isRetryable(err.status)) throw new Error(err.body?.error || `Upload failed (${err.status}).`);
+          if (++failures > UPLOAD_MAX_RETRIES) {
+            throw new Error('The connection kept dropping, so the upload stopped. Check your internet and try again.');
+          }
+          const wait = Math.min(30000, 1000 * 2 ** (failures - 1));
+          setProgress((offset / file.size) * 100, `Connection problem. Retrying in ${Math.round(wait / 1000)} s…`);
+          await sleep(wait);
+        }
+      }
+
+      setProgress(100, 'Finishing…');
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await uploadApi('POST', `/api/uploads/${uploadId}/complete`, { mode });
+          break;
+        } catch (err) {
+          if (upload.cancelled) throw CANCELLED;
+          if (err.status || attempt >= 5) throw err; // a real error from the server, or still offline
+          await sleep(2000 * attempt);
+        }
+      }
+
       selectedFile = null;
       $('fileInput').value = '';
       $('dzLabel').innerHTML = 'Drop a video here or <u>choose a file</u>';
       $('dzSub').textContent = 'MP4 (H.264/AAC) or WebM plays in every browser';
-      done(mode === 'queue' ? 'Uploaded and added to the queue.' : 'Uploaded! Starting for everyone…');
-      renderControls();
-    };
-    xhr.onerror = () => done('Upload failed. Check your connection.');
-    xhr.onabort = () => done('Upload cancelled.');
-    xhr.send(fd);
+      finishUpload(mode === 'queue' ? 'Uploaded and added to the queue.' : 'Uploaded! Starting for everyone…');
+    } catch (err) {
+      // Throw away the partial file on the server.
+      if (upload.id) fetch(`/api/uploads/${upload.id}`, { method: 'DELETE' }).catch(() => {});
+      finishUpload(err === CANCELLED ? 'Upload cancelled.' : err.message || 'Upload failed.');
+    }
+  }
+
+  function finishUpload(msg) {
+    currentUpload = null;
+    $('uploadProgress').hidden = true;
+    $('uploadNow').hidden = $('uploadQueue').hidden = false;
+    renderControls();
+    if (msg) toast(msg);
   }
 
   /* ------------------------------------------------------------------ chat */
