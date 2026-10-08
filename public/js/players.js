@@ -192,9 +192,12 @@ window.Players = (() => {
     2: 'That YouTube link is invalid.',
     5: "YouTube couldn't play this video in the browser.",
     100: 'This YouTube video was removed or is private.',
-    101: "The video's owner doesn't allow it to be played on other websites.",
-    150: "The video's owner doesn't allow it to be played on other websites.",
+    101: "YouTube won't play this video here.",
+    150: "YouTube won't play this video here.",
   };
+  // YouTube uses these codes both for "the owner turned off embedding" and for its
+  // "Sign in to confirm you're not a bot" check, so the page can't tell which one it is.
+  const YT_BLOCKED = new Set([101, 150, 152, 153]);
 
   class YouTubeAdapter {
     constructor(container, media, ev) {
@@ -250,7 +253,8 @@ window.Players = (() => {
                   ev.onBuffering(e.data === YT.PlayerState.BUFFERING);
                   if (!reported) report();
                 },
-                onError: (e) => ev.onError(YT_ERRORS[e.data] || `YouTube error ${e.data}.`),
+                onError: (e) =>
+                  ev.onError(YT_ERRORS[e.data] || `YouTube error ${e.data}.`, { youtubeBlocked: YT_BLOCKED.has(e.data), code: e.data }),
               },
             });
           }),

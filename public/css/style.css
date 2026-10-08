@@ -374,3 +374,15 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 .quality-pill.clickable { cursor: pointer; color: var(--text); border-color: var(--accent); }
 .quality-pill.clickable:hover { background: rgba(255, 77, 109, .12); }
 .quality-pill:not([hidden]) + .sync-pill { margin-left: 0; }
+
+/* YouTube refused to play: a strip along the bottom, so YouTube's own screen above stays clickable. */
+.stage-overlay.is-notice {
+  inset: auto 0 0 0;
+  padding: 8px 14px 10px;
+  gap: 4px;
+  background: rgba(10, 4, 8, .92);
+  pointer-events: auto;
+}
+.stage-overlay.is-notice .notice-head { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.stage-overlay.is-notice strong { font-size: 14px; color: var(--accent); margin-right: 4px; }
+.stage-overlay.is-notice p { font-size: 12px; max-width: 80ch; }

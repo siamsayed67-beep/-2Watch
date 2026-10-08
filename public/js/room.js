@@ -52,7 +52,8 @@
   if (!Number.isFinite(volume)) volume = 0.8;
   let muted = store.get('muted') === '1';
 
-  const overlay = { error: null, blocked: false, countdown: 0, loading: null, buffering: false };
+  // youtubeBlock: YouTube refused to play here; shown as a strip so YouTube's own screen stays usable.
+  const overlay = { error: null, youtubeBlock: null, blocked: false, countdown: 0, loading: null, buffering: false };
 
   // Smooth mode: the server makes lower-quality copies of uploads (HLS). Viewers whose connection
   // can't keep up with the original are switched to them, and their player picks the best
@@ -314,7 +315,7 @@
     leadCheckAt = 0;
     lastDrift = null;
     pausedWhileWantedSince = 0;
-    Object.assign(overlay, { error: null, blocked: false, loading: null, buffering: false });
+    Object.assign(overlay, { error: null, youtubeBlock: null, blocked: false, loading: null, buffering: false });
     mountedId = media?.id ?? null;
     $('stageMedia').replaceChildren();
     $('stageEmpty').hidden = !!media;
@@ -328,6 +329,11 @@
         onMeta: (meta) => adapter === a && socket.emit('media:meta', { mediaId: media.id, ...meta }),
         onError: (msg, info) => {
           if (adapter !== a) return;
+          if (info?.youtubeBlocked) {
+            overlay.loading = null;
+            overlay.youtubeBlock = { url: media.src };
+            return renderOverlay();
+          }
           // The browser can't decode this format (e.g. HEVC/MKV): use the converted copy instead.
           if (info?.unsupported && media.kind === 'file' && !useAdaptive) {
             wantAdaptive.add(media.id);
@@ -395,7 +401,7 @@
    */
   function syncTick() {
     const a = adapter;
-    if (!a || !adapterReady || !playback || playback.mediaId !== mountedId || overlay.error) {
+    if (!a || !adapterReady || !playback || playback.mediaId !== mountedId || overlay.error || overlay.youtubeBlock) {
       if (overlay.countdown) {
         overlay.countdown = 0;
         renderOverlay();
@@ -524,6 +530,9 @@
     const el = $('stageOverlay');
     el.className = 'stage-overlay';
     el.onclick = null;
+    // Let clicks reach YouTube's own screen (e.g. its "Sign in" button) while it's refusing to play.
+    $('stageShield').hidden = !!overlay.youtubeBlock;
+    if (overlay.youtubeBlock) return renderYoutubeBlock(el);
     let content = null;
     if (overlay.error) {
       el.classList.add('is-error');
@@ -550,6 +559,31 @@
         return n;
       }),
     );
+  }
+
+  function renderYoutubeBlock(el) {
+    el.classList.add('is-notice');
+    const title = document.createElement('strong');
+    title.textContent = "YouTube won't play this video here";
+    const text = document.createElement('p');
+    text.textContent =
+      'If YouTube asks you to sign in to confirm you’re not a bot, sign in on its screen above (or turn off your VPN) and press Try again. If it doesn’t, the video’s owner has blocked playing it on other websites.';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'btn small primary';
+    retry.textContent = 'Try again';
+    retry.onclick = () => mountMedia(state?.media);
+    const open = document.createElement('a');
+    open.className = 'btn small';
+    open.href = overlay.youtubeBlock.url;
+    open.target = '_blank';
+    open.rel = 'noopener';
+    open.textContent = 'Open on YouTube';
+    const head = document.createElement('div');
+    head.className = 'notice-head';
+    head.append(title, retry, open);
+    el.replaceChildren(head, text);
+    el.hidden = false;
   }
 
   function renderUsers() {
