@@ -386,3 +386,22 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 .stage-overlay.is-notice .notice-head { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
 .stage-overlay.is-notice strong { font-size: 14px; color: var(--accent); margin-right: 4px; }
 .stage-overlay.is-notice p { font-size: 12px; max-width: 80ch; }
+
+/* ---------- voice chat ---------- */
+
+.voice-bar { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+#micBtn { flex: none; }
+#micBtn svg { width: 16px; height: 16px; }
+#micBtn.muted { border-color: var(--accent); color: var(--accent); }
+.voice-status {
+  appearance: none; border: 0; background: none; padding: 0; text-align: left;
+  font: inherit; font-size: 12.5px; color: var(--muted); cursor: default;
+}
+.voice-status.clickable { color: var(--warn); cursor: pointer; text-decoration: underline; }
+.voice-hint { font-size: 12px; margin-top: 8px; }
+.voice-icon { display: inline-grid; place-items: center; width: 18px; height: 18px; flex: none; color: var(--muted); }
+.voice-icon svg { width: 16px; height: 16px; }
+.voice-icon.on { color: var(--ok); }
+.voice-icon.muted { color: var(--accent); }
+.avatar { transition: box-shadow .12s; }
+.avatar.speaking { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ok); }
