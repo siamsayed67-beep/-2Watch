@@ -123,15 +123,60 @@
     socket?.disconnect();
   }
 
+  /*
+   * Rooms live in the server's memory, so a server restart loses them. This browser keeps a
+   * copy of its room (also saved locally, so it survives a page refresh). If the room is gone
+   * when we reconnect, we ask the server to recreate it from that copy and carry on.
+   */
+  const SNAPSHOT_KEY = `room.${roomId}`;
+  const SNAPSHOT_MAX_AGE_MS = 12 * 3600 * 1000;
+
+  function roomSnapshot() {
+    if (!state) return null;
+    const item = (m) => m && { kind: m.kind, src: m.src, title: m.title, duration: m.duration, addedBy: m.addedBy };
+    return {
+      name: state.name,
+      everyoneCanControl: state.everyoneCanControl,
+      hostId: state.hostId,
+      media: item(state.media),
+      queue: state.queue.map(item),
+      playback: { playing: !!playback?.playing, position: Math.max(0, targetTime()) },
+      savedAt: Date.now(),
+    };
+  }
+
+  function saveSnapshot() {
+    const snap = roomSnapshot();
+    if (snap) store.set(SNAPSHOT_KEY, JSON.stringify(snap));
+  }
+
+  function savedSnapshot() {
+    try {
+      const snap = JSON.parse(store.get(SNAPSHOT_KEY));
+      if (!snap || Date.now() - snap.savedAt > SNAPSHOT_MAX_AGE_MS) return null;
+      // The video kept playing for everyone while this copy sat here.
+      if (snap.playback?.playing) snap.playback.position += (Date.now() - snap.savedAt) / 1000;
+      return snap;
+    } catch {
+      return null;
+    }
+  }
+
   fetch(`/api/rooms/${encodeURIComponent(roomId)}`)
-    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((r) => (r.ok ? r.json() : r.status === 404 ? { missing: true } : Promise.reject()))
     .then((info) => {
+      if (info.missing) {
+        // Gone from the server, but we can bring it back if this browser was in it recently.
+        const snap = savedSnapshot();
+        if (!snap) return fatal('This room does not exist or has closed.');
+        info = { name: snap.name };
+      }
       $('joinRoomName').textContent = info.name;
       $('roomName').textContent = info.name;
       document.title = `${info.name} · 2Watch`;
       if (info.maxUploadMb) $('dzSub').textContent += ` · up to ${info.maxUploadMb >= 1024 ? (info.maxUploadMb / 1024).toFixed(0) + ' GB' : info.maxUploadMb + ' MB'}`;
     })
-    .catch(() => fatal('This room does not exist or has closed.'));
+    .catch(() => fatal('Could not reach the server. Refresh the page to try again.'));
 
   let accountsOn = false;
   const goSignIn = () => location.replace(`/?next=${encodeURIComponent(location.pathname)}`);
@@ -173,14 +218,22 @@
       setConnStatus(null);
       // Fetched on every (re)connect so a refreshed token is used after long sessions.
       const token = await accessToken();
-      socket.emit('room:join', { roomId, clientId, name: myName, token }, (res) => {
-        if (res?.needsAuth) return goSignIn();
-        if (!res?.ok) return fatal(res?.error || 'Could not join the room.');
-        clientId = res.clientId;
-        $('chatLog').replaceChildren();
-        res.chat.forEach(addChatMessage);
-        syncClock();
-      });
+      const join = () => new Promise((resolve) => socket.emit('room:join', { roomId, clientId, name: myName, token }, resolve));
+      let res = await join();
+      if (res?.notFound) {
+        // The server restarted and lost the room: recreate it from our copy, then join again.
+        const snapshot = roomSnapshot() || savedSnapshot();
+        if (snapshot) {
+          await new Promise((resolve) => socket.emit('room:restore', { roomId, name: myName, token, snapshot }, resolve));
+          res = await join();
+        }
+      }
+      if (res?.needsAuth) return goSignIn();
+      if (!res?.ok) return fatal(res?.error || 'Could not join the room.');
+      clientId = res.clientId;
+      $('chatLog').replaceChildren();
+      res.chat.forEach(addChatMessage);
+      syncClock();
     });
     socket.on('disconnect', () => setConnStatus('Reconnecting…'));
     socket.on('room:state', onState);
@@ -195,6 +248,7 @@
     setInterval(syncClock, 30000);
     setInterval(syncTick, 250);
     setInterval(renderTimeline, 200);
+    setInterval(saveSnapshot, 5000);
   }
 
   function setConnStatus(text) {
@@ -222,6 +276,7 @@
   function onState(s) {
     state = s;
     playback = s.playback;
+    saveSnapshot();
     $('roomName').textContent = s.name;
     document.title = `${s.name} · 2Watch`;
     renderUsers();

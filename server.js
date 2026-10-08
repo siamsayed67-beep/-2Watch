@@ -83,9 +83,9 @@ function clean(value, max, fallback = '') {
   return s || fallback;
 }
 
-function createRoom(name) {
-  let id;
-  do id = randomId(6); while (rooms.has(id));
+function createRoom(name, existingId) {
+  let id = existingId;
+  while (!id || rooms.has(id)) id = randomId(6);
   const room = {
     id,
     name,
@@ -521,19 +521,69 @@ function leaveRoom(socket) {
   if (!stillHere) announce(room, `${me.name} left`);
   if (room.members.size === 0) room.emptySince = Date.now();
 
-  if (me.clientId === room.hostId && !stillHere) {
-    clearTimeout(room.hostTimer);
-    room.hostTimer = setTimeout(() => {
-      if (!rooms.has(room.id)) return;
-      const present = [...room.members.values()];
-      if (present.some((m) => m.clientId === room.hostId)) return;
-      const next = present[0];
-      room.hostId = next?.clientId ?? null;
-      if (next) announce(room, `${next.name} is now the host`);
-      broadcastState(room);
-    }, HOST_GRACE_MS);
-  }
+  if (me.clientId === room.hostId && !stillHere) scheduleHostHandover(room);
   broadcastState(room);
+}
+
+// If the host doesn't come back within the grace period, someone else present becomes host.
+function scheduleHostHandover(room) {
+  clearTimeout(room.hostTimer);
+  room.hostTimer = setTimeout(() => {
+    if (!rooms.has(room.id)) return;
+    const present = [...room.members.values()];
+    if (present.some((m) => m.clientId === room.hostId)) return;
+    const next = present[0];
+    room.hostId = next?.clientId ?? null;
+    if (next) announce(room, `${next.name} is now the host`);
+    broadcastState(room);
+  }, HOST_GRACE_MS);
+}
+
+/*
+ * Rooms live in memory, so a server restart (a crash, a redeploy, or the host restarting
+ * the service) loses them. Every viewer's browser keeps a copy of its room, and the first
+ * one to reconnect recreates it from that copy, so the party carries on where it was.
+ * Video links are re-checked rather than trusted. Uploaded files were stored by the old
+ * server process and are gone, so they're left out and the room is told.
+ */
+function restoreRoom(id, snap, restoredBy) {
+  const room = createRoom(clean(snap?.name, 60, 'Watch party'), id);
+  room.everyoneCanControl = snap?.everyoneCanControl !== false;
+  let lostUploads = 0;
+  const restoreItem = (it) => {
+    if (!it || typeof it !== 'object') return null;
+    if (it.kind === 'file') {
+      lostUploads++;
+      return null;
+    }
+    const parsed = parseMediaUrl(String(it.src ?? ''));
+    if (parsed.error) return null;
+    const duration = Number(it.duration);
+    return {
+      id: randomId(10),
+      ...parsed,
+      title: clean(it.title, 120, parsed.title),
+      titleFromClient: false,
+      duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+      addedBy: clean(it.addedBy, 32, 'Someone'),
+    };
+  };
+  room.media = restoreItem(snap?.media);
+  room.queue = (Array.isArray(snap?.queue) ? snap.queue.slice(0, 200) : []).map(restoreItem).filter(Boolean);
+  if (room.media) {
+    let pos = Math.max(0, Number(snap?.playback?.position) || 0);
+    if (room.media.duration) pos = Math.min(pos, room.media.duration);
+    room.playback = { playing: !!snap?.playback?.playing, position: pos, updatedAt: Date.now() + START_DELAY_MS };
+  }
+  // The previous host keeps the role if they come back; otherwise it's handed on as usual.
+  room.hostId = clean(snap?.hostId, 64) || null;
+  if (room.hostId) scheduleHostHandover(room);
+  announce(
+    room,
+    `The server restarted, so ${restoredBy} restored this room.` +
+      (lostUploads ? ' Uploaded videos were lost in the restart and need to be uploaded again.' : ''),
+  );
+  return room;
 }
 
 io.on('connection', (socket) => {
@@ -560,6 +610,22 @@ io.on('connection', (socket) => {
   // Clients measure their clock offset against this to compute where "now" is in the video.
   socket.on('time:ping', (cb) => typeof cb === 'function' && cb(Date.now()));
 
+  // Recreates a room lost in a server restart from a viewer's copy (see restoreRoom).
+  socket.on('room:restore', async (data, cb) => {
+    if (typeof cb !== 'function') return;
+    const roomId = String(data?.roomId ?? '');
+    if (!/^[a-z0-9]{4,16}$/.test(roomId)) return cb({ ok: false, error: 'Invalid room code.' });
+    let name = clean(data?.name, 32, 'Someone');
+    if (authEnabled) {
+      const user = await verifyToken(data?.token);
+      if (!user) return cb({ ok: false, error: 'Please sign in to join this room.', needsAuth: true });
+      name = clean(user.name, 32, 'Someone');
+    }
+    // Another viewer may have restored it a moment ago; then there's nothing to do.
+    if (!rooms.has(roomId)) restoreRoom(roomId, data?.snapshot, name);
+    cb({ ok: true });
+  });
+
   socket.on('room:join', async (data, cb) => {
     if (typeof cb !== 'function') return;
     let clientId = clean(data?.clientId, 64);
@@ -573,7 +639,7 @@ io.on('connection', (socket) => {
       name = clean(user.name, 32, 'Guest');
     }
     const room = rooms.get(String(data?.roomId ?? ''));
-    if (!room) return cb({ ok: false, error: 'This room does not exist or has closed.' });
+    if (!room) return cb({ ok: false, notFound: true, error: 'This room does not exist or has closed.' });
     if (!clientId) return cb({ ok: false, error: 'Missing client id.' });
 
     if (socket.data.roomId) leaveRoom(socket);
