@@ -26,9 +26,6 @@
     muted: '<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 9.5l5 5M21.5 9.5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
     skip: '<svg viewBox="0 0 24 24"><path d="M6 5.5v13l9-6.5zM16 5.5h2.5v13H16z"/></svg>',
     fullscreen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
-    mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3" fill="currentColor"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
-    micOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M4 4l16 16"/></svg>',
-    headphones: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/></svg>',
   };
   const KIND_LABEL = { file: 'Upload', direct: 'Link', youtube: 'YouTube', facebook: 'Facebook', vimeo: 'Vimeo', twitch: 'Twitch' };
 
@@ -44,7 +41,7 @@
   let adapter = null;
   let adapterReady = false;
   let mountedId; // id of the media currently mounted in the stage
-  let lastSeekAt = -Infinity; // "never": a newly loaded video may jump to the room's position straight away
+  let lastSeekAt = 0;
   let leadCheckAt = 0;
   let playAttemptAt = 0;
   let pausedWhileWantedSince = 0;
@@ -237,7 +234,6 @@
       $('chatLog').replaceChildren();
       res.chat.forEach(addChatMessage);
       syncClock();
-      startVoice();
     });
     socket.on('disconnect', () => setConnStatus('Reconnecting…'));
     socket.on('room:state', onState);
@@ -370,7 +366,7 @@
     }
     adapter = null;
     adapterReady = false;
-    lastSeekAt = -Infinity;
+    lastSeekAt = 0;
     leadCheckAt = 0;
     lastDrift = null;
     pausedWhileWantedSince = 0;
@@ -660,16 +656,6 @@
         li.append(avatar, name);
         if (u.id === state.hostId) li.append(tag('host', 'Host'));
         if (u.id === clientId) li.append(tag('you', 'You'));
-        // Voice: a green ring while talking, and a mic icon showing whether they can be heard.
-        const talking = voice?.speaking.has(u.id === clientId ? 'self' : u.id);
-        avatar.classList.toggle('speaking', !!talking);
-        if (u.voice) {
-          const mic = document.createElement('span');
-          mic.className = `voice-icon ${u.voice}`;
-          mic.innerHTML = u.voice === 'on' ? ICON.mic : u.voice === 'muted' ? ICON.micOff : ICON.headphones;
-          mic.title = u.voice === 'on' ? 'In voice chat' : u.voice === 'muted' ? 'Muted' : 'Listening (no microphone)';
-          li.append(mic);
-        }
         return li;
       }),
     );
@@ -678,66 +664,6 @@
     $('hostSetting').hidden = !isHost();
     $('everyoneCtl').checked = state.everyoneCanControl;
   }
-
-  /* ------------------------------------------------------------ voice chat */
-
-  let voice = null;
-  const configPromise = fetch('/api/config')
-    .then((r) => r.json())
-    .catch(() => ({}));
-
-  // Joining the room joins voice chat; after a reconnect, voice is rebuilt.
-  async function startVoice() {
-    if (voice) return voice.rejoin();
-    if (!window.RTCPeerConnection) {
-      $('voiceStatus').textContent = "This browser doesn't support voice chat.";
-      return;
-    }
-    const { iceServers } = await configPromise;
-    voice = new VoiceChat({ socket, iceServers, onChange: renderVoice });
-    await voice.start(store.get('micMuted') === '1');
-  }
-
-  function renderVoice(v) {
-    const btn = $('micBtn');
-    const status = $('voiceStatus');
-    btn.disabled = false;
-    btn.classList.toggle('muted', v.hasMic && v.muted);
-    if (!v.hasMic) {
-      btn.innerHTML = `${ICON.micOff} ${v.micError === 'blocked' ? 'Allow mic' : 'No mic'}`;
-      btn.disabled = v.micError !== 'blocked';
-    } else {
-      btn.innerHTML = v.muted ? `${ICON.micOff} Unmute` : `${ICON.mic} Mute mic`;
-    }
-    btn.title = v.hasMic ? 'Mute or unmute your microphone (shortcut: V)' : '';
-
-    status.disabled = !v.needsClick;
-    status.classList.toggle('clickable', v.needsClick);
-    status.textContent = v.needsClick
-      ? "Click to hear others' voices"
-      : v.micError === 'blocked'
-        ? 'Microphone blocked: allow it in the address bar, then press Allow mic. You can still listen.'
-        : v.micError === 'insecure'
-          ? 'Your microphone needs a secure (https) link. You can still listen.'
-          : v.micError === 'nomic'
-            ? 'No microphone found. You can still listen.'
-            : !v.joined
-              ? 'Voice chat starting…'
-              : v.total === 0
-                ? 'Voice chat on · nobody else is in voice yet'
-                : `Voice chat · ${v.connected} of ${v.total} connected`;
-    if (state) renderUsers();
-  }
-
-  function toggleMic() {
-    if (!voice) return;
-    if (!voice.stream) return voice.micError === 'blocked' && voice.retryMic();
-    voice.setMuted(!voice.muted);
-    store.set('micMuted', voice.muted ? '1' : '0');
-  }
-
-  $('micBtn').onclick = toggleMic;
-  $('voiceStatus').onclick = () => voice?.unlockAudio();
 
   function tag(cls, text) {
     const s = document.createElement('span');
@@ -911,7 +837,6 @@
     if (k === ' ' || k === 'k') { e.preventDefault(); togglePlay(); }
     else if (k === 'f') toggleFullscreen();
     else if (k === 'm') $('muteBtn').click();
-    else if (k === 'v') toggleMic();
     else if (k === 'arrowleft') seekBy(-10);
     else if (k === 'arrowright') seekBy(10);
   });

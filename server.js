@@ -133,13 +133,7 @@ function setPlayback(room, playing, position) {
 function publicState(room) {
   const users = new Map();
   for (const m of room.members.values()) {
-    if (!users.has(m.clientId)) users.set(m.clientId, { id: m.clientId, name: m.name, voice: null });
-    // Voice status per person (a person may have several tabs): 'on', 'muted' or 'nomic'.
-    if (m.voice) {
-      const u = users.get(m.clientId);
-      const v = !m.voice.hasMic ? 'nomic' : m.voice.muted ? 'muted' : 'on';
-      if (!u.voice || v === 'on' || (v === 'muted' && u.voice === 'nomic')) u.voice = v;
-    }
+    if (!users.has(m.clientId)) users.set(m.clientId, { id: m.clientId, name: m.name });
   }
   return {
     id: room.id,
@@ -353,23 +347,8 @@ function fmtTime(sec) {
 
 // The browser needs these to talk to Supabase. The anon key is meant to be public;
 // what users can do with it is limited by Supabase's own rules.
-// Voice chat connects browsers directly. STUN servers let them find a route through home
-// routers; a TURN server (optional, set in .env) relays audio for the few networks where a
-// direct connection isn't possible.
-const ICE_SERVERS = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
-if (process.env.TURN_URL) {
-  ICE_SERVERS.push({
-    urls: process.env.TURN_URL.split(',').map((u) => u.trim()),
-    username: process.env.TURN_USERNAME,
-    credential: process.env.TURN_CREDENTIAL,
-  });
-}
-
 app.get('/api/config', (req, res) => {
-  res.json({
-    ...(authEnabled ? { supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY } : {}),
-    iceServers: ICE_SERVERS,
-  });
+  res.json(authEnabled ? { supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY } : {});
 });
 
 app.post('/api/rooms', async (req, res) => {
@@ -537,7 +516,6 @@ function leaveRoom(socket) {
   const me = room.members.get(socket.id);
   room.members.delete(socket.id);
   if (!me) return;
-  if (me.voice) socket.to(room.id).emit('voice:peer-left', { id: socket.id });
 
   const stillHere = [...room.members.values()].some((m) => m.clientId === me.clientId);
   if (!stillHere) announce(room, `${me.name} left`);
@@ -768,47 +746,6 @@ io.on('connection', (socket) => {
       broadcastState(room);
       announce(room, data.everyoneCanControl ? `${name} let everyone control playback` : `${name} made playback host-only`);
     }
-  });
-
-  /*
-   * Voice chat signalling. Audio goes directly between browsers (WebRTC); the server only
-   * introduces them: it tells a new voice participant who's already there and passes their
-   * connection offers between them. Peers are identified by socket id (one per tab).
-   */
-  on('voice:join', {}, (room, { clientId, name }, data) => {
-    const me = room.members.get(socket.id);
-    if (!me) return { ok: false, error: 'Join the room first.' };
-    me.voice = { muted: !!data.muted, hasMic: !!data.hasMic };
-    const peers = [];
-    for (const [sid, m] of room.members) {
-      if (sid !== socket.id && m.voice) peers.push({ id: sid, clientId: m.clientId, name: m.name });
-    }
-    socket.to(room.id).emit('voice:peer-joined', { id: socket.id, clientId, name });
-    broadcastState(room);
-    return { ok: true, peers };
-  });
-
-  on('voice:leave', {}, (room) => {
-    const me = room.members.get(socket.id);
-    if (!me?.voice) return;
-    me.voice = null;
-    socket.to(room.id).emit('voice:peer-left', { id: socket.id });
-    broadcastState(room);
-  });
-
-  on('voice:mute', {}, (room, ctx, data) => {
-    const me = room.members.get(socket.id);
-    if (!me?.voice) return;
-    me.voice.muted = !!data.muted;
-    broadcastState(room);
-  });
-
-  // Connection details (offer/answer/network candidates) for one other participant in the room.
-  on('voice:signal', {}, (room, ctx, data) => {
-    const to = String(data.to ?? '');
-    if (!room.members.get(to)?.voice || !room.members.get(socket.id)?.voice) return;
-    if (JSON.stringify(data.data ?? null).length > 20000) return { ok: false, error: 'Signal too large.' };
-    io.to(to).emit('voice:signal', { from: socket.id, data: data.data });
   });
 
   let lastChatAt = 0;

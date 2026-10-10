@@ -131,24 +131,12 @@ Measured with one viewer's connection limited to below the video's data rate (a 
 
 FFmpeg is found automatically on the `PATH` (and, on Windows, where `winget install Gyan.FFmpeg` puts it). Otherwise set `FFMPEG_PATH` and `FFPROBE_PATH`. Without FFmpeg, uploads play in their original quality only.
 
-## Voice chat
-
-Everyone who joins a room is in its voice chat automatically. The browser asks for microphone permission once.
-
-- **Low delay:** voices go directly between viewers' browsers (WebRTC, Opus codec), not through the server, so the delay is only the network distance between people, typically 0.1–0.3 s. Echo cancellation, noise suppression and automatic volume levelling are on.
-- **Mute** with the **Mute mic** button under "Watching now", or the **V** key. Your choice is remembered. Everyone sees who's in voice, who's muted (red mic) and who's talking (green ring).
-- **No microphone, or permission refused:** you can still hear everyone. If you blocked the microphone, allow it in the address bar and press **Allow mic**.
-- Use **headphones**: otherwise the video's sound from your speakers can reach the others through your microphone.
-- Microphones only work on **https** links (or `localhost`): the Cloudflare tunnel, Render and HTTPS servers are fine.
-- Everyone connects to everyone, which works well for up to about 8 people in voice.
-- A few strict networks (some offices and mobile carriers) block direct connections. For those, add a TURN relay server in `.env` (`TURN_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL`). The voice audio of those viewers then goes through the relay.
-
 ## Rooms and permissions
 
 - The person who creates a room is the **host**. If the host leaves for more than 20 s, the host role passes to someone else.
 - By default **everyone can control** playback and add videos. The host can switch the room to host-only.
 - The room includes a **queue** ("Add to queue"), a **chat** that also logs who paused or skipped, and a viewer list.
-- Keyboard shortcuts: `Space`/`K` play/pause, `←`/`→` ±10 s, `F` fullscreen, `M` mute the video, `V` mute your microphone.
+- Keyboard shortcuts: `Space`/`K` play/pause, `←`/`→` ±10 s, `F` fullscreen, `M` mute.
 
 ## Platform notes
 
@@ -180,7 +168,6 @@ The server must keep running between requests, because rooms and the sync clock 
 | `ROOM_IDLE_MINUTES` | `30` | Empty rooms are deleted after this long |
 | `CLOUDFLARED_PATH` | (auto) | Path to `cloudflared.exe`, if `npm run share` can't find it |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | (auto) | Paths to FFmpeg and FFprobe for smooth mode, if they aren't found automatically |
-| `TURN_URL`, `TURN_USERNAME`, `TURN_CREDENTIAL` | (unset) | Optional TURN relay for voice chat on networks that block direct connections |
 
 All environment variables go in `.env`, which git ignores, so it's never uploaded to GitHub.
 
