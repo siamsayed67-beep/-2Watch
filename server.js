@@ -40,8 +40,20 @@ server.requestTimeout = 15 * 60 * 1000;
 const io = new Server(server);
 
 app.use(express.json({ limit: '10kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/room/:id', (req, res) => res.sendFile(path.join(__dirname, 'public', 'room.html')));
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html') || req.path.startsWith('/room/')) {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  }
+  next();
+});
+
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+app.get('/room/:id', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.sendFile(path.join(__dirname, 'public', 'room.html'));
+});
 
 /* ------------------------------------------------------------------ rooms */
 
