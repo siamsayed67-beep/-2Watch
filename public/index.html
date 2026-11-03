@@ -11,8 +11,7 @@
   <header class="topbar">
     <a class="brand" href="/"><span class="brand-mark">2</span>Watch</a>
     <div class="top-actions" style="margin-left: auto;">
-      <span class="signed-in-as" id="authUser" hidden></span>
-      <button class="btn small" id="logoutBtn" type="button" hidden>Sign out</button>
+      <span class="signed-in-as" id="sessionUser" hidden></span>
     </div>
   </header>
 
@@ -28,138 +27,89 @@
     </section>
 
     <section class="home-cards">
-      <form class="card" id="authCard" hidden>
-        <div class="tabs" role="tablist">
-          <button class="tab active" type="button" data-mode="signin">Sign in</button>
-          <button class="tab" type="button" data-mode="signup">Create account</button>
-        </div>
-        <label class="field" id="usernameField" hidden>
-          <span>Display name</span>
-          <input class="input" id="authUsername" maxlength="32" placeholder="What friends will see">
-        </label>
-        <label class="field">
-          <span>Email</span>
-          <input class="input" id="authEmail" type="email" autocomplete="email" required>
-        </label>
-        <label class="field">
-          <span>Password</span>
-          <input class="input" id="authPassword" type="password" autocomplete="current-password" minlength="6" required>
-        </label>
-        <button class="btn primary big" type="submit" id="authSubmit">Sign in</button>
-        <p class="hint" id="authMessage"></p>
-      </form>
-
-      <form class="card" id="createForm" hidden>
+      <form class="card" id="createForm">
         <h2>Start a watch party</h2>
         <label class="field">
-          <span>Room name</span>
+          <span>Your name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
+          <input class="input" id="userNameInput" maxlength="32" placeholder="e.g. Alex (leave blank for random)">
+        </label>
+        <label class="field">
+          <span>Room name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
           <input class="input" id="roomNameInput" maxlength="60" placeholder="Friday movie night">
         </label>
-        <button class="btn primary big" type="submit">Create room</button>
+        <button class="btn primary big" type="submit" id="createBtn">Create room</button>
         <p class="hint" id="createError"></p>
       </form>
 
-      <form class="card" id="joinForm" hidden>
+      <form class="card" id="joinForm">
         <h2>Have an invite?</h2>
         <label class="field">
           <span>Room code or link</span>
           <input class="input" id="joinInput" placeholder="e.g. k7m2qp" required>
         </label>
-        <button class="btn big" type="submit">Join room</button>
+        <label class="field">
+          <span>Your name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
+          <input class="input" id="joinNameInput" maxlength="32" placeholder="e.g. Alex (leave blank for random)">
+        </label>
+        <button class="btn big" type="submit" id="joinBtn">Join room</button>
       </form>
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="/js/auth.js"></script>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
-      // After signing in, go back to the room the person was invited to (if any).
-      const next = new URLSearchParams(location.search).get('next');
-      const safeNext = next && /^\/room\/[\w-]+$/.test(next) ? next : null;
-      let mode = 'signin';
-      let session = null;
 
-      function show(signedIn) {
-        $('authCard').hidden = signedIn;
-        $('createForm').hidden = !signedIn;
-        $('joinForm').hidden = !signedIn;
+      // Clean up any legacy permanent name from localStorage so it's not permanent
+      try { localStorage.removeItem('2watch.name'); } catch {}
+
+      function getRandomGuestName() {
+        return 'Guest ' + Math.floor(1000 + Math.random() * 9000);
       }
 
-      Auth.ready
-        .then(async (enabled) => {
-          if (!enabled) return show(true); // accounts switched off: anyone can use the site
-          session = await Auth.getSession();
-          if (session) {
-            if (safeNext) return location.replace(safeNext);
-            $('authUser').textContent = `Signed in as ${Auth.displayName(session.user)}`;
-            $('authUser').hidden = $('logoutBtn').hidden = false;
-          }
-          show(!!session);
-        })
-        .catch((err) => {
-          show(false);
-          $('authMessage').textContent = err.message || 'Could not reach the server.';
-        });
-
-      for (const tab of document.querySelectorAll('#authCard .tab')) {
-        tab.onclick = () => {
-          mode = tab.dataset.mode;
-          for (const t of document.querySelectorAll('#authCard .tab')) t.classList.toggle('active', t === tab);
-          $('usernameField').hidden = mode !== 'signup';
-          $('authSubmit').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
-          $('authPassword').autocomplete = mode === 'signup' ? 'new-password' : 'current-password';
-          $('authMessage').textContent = '';
-        };
+      function getSessionName() {
+        try { return sessionStorage.getItem('2watch.name') || ''; } catch { return ''; }
       }
 
-      $('authCard').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const email = $('authEmail').value.trim();
-        const password = $('authPassword').value;
-        const msg = $('authMessage');
-        $('authSubmit').disabled = true;
-        msg.textContent = '';
-        try {
-          if (mode === 'signup') {
-            const username = $('authUsername').value.trim() || email.split('@')[0];
-            const res = await Auth.signUp(email, password, username);
-            if (res.needsConfirmation) {
-              msg.textContent = 'Account created. Check your email and click the confirmation link, then sign in here.';
-              return;
-            }
-          } else {
-            await Auth.signIn(email, password);
-          }
-          location.replace(safeNext || '/');
-        } catch (err) {
-          msg.textContent = err.message || 'Something went wrong. Please try again.';
-        } finally {
-          $('authSubmit').disabled = false;
-        }
+      function setSessionName(name) {
+        try { sessionStorage.setItem('2watch.name', name); } catch {}
+      }
+
+      const initialName = getSessionName();
+      if (initialName) {
+        $('userNameInput').value = initialName;
+        $('joinNameInput').value = initialName;
+        $('sessionUser').textContent = `Session name: ${initialName}`;
+        $('sessionUser').hidden = false;
+      }
+
+      // Sync name inputs
+      $('userNameInput').addEventListener('input', (e) => {
+        $('joinNameInput').value = e.target.value;
       });
-
-      $('logoutBtn').onclick = async () => {
-        await Auth.signOut();
-        location.reload();
-      };
+      $('joinNameInput').addEventListener('input', (e) => {
+        $('userNameInput').value = e.target.value;
+      });
 
       $('createForm').addEventListener('submit', async (e) => {
         e.preventDefault();
-        const btn = e.submitter;
+        const btn = $('createBtn');
         btn.disabled = true;
         try {
-          const headers = { 'Content-Type': 'application/json' };
-          const s = await Auth.getSession();
-          if (s) headers.Authorization = `Bearer ${s.access_token}`;
+          const rawName = $('userNameInput').value.trim();
+          let name = rawName;
+          if (!name) {
+            name = getSessionName() || getRandomGuestName();
+          }
+          setSessionName(name);
+
           const res = await fetch('/api/rooms', {
             method: 'POST',
-            headers,
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: $('roomNameInput').value }),
           });
           const body = await res.json().catch(() => ({}));
-          if (!res.ok) throw new Error(body.error);
+          if (!res.ok) throw new Error(body.error || 'Could not create a room.');
           location.href = '/room/' + body.id;
         } catch (err) {
           $('createError').textContent = err.message || 'Could not create a room. Is the server running?';
@@ -170,7 +120,14 @@
       $('joinForm').addEventListener('submit', (e) => {
         e.preventDefault();
         const code = $('joinInput').value.trim().split('/').filter(Boolean).pop();
-        if (code) location.href = '/room/' + encodeURIComponent(code);
+        if (!code) return;
+        const rawName = $('joinNameInput').value.trim();
+        let name = rawName;
+        if (!name) {
+          name = getSessionName() || getRandomGuestName();
+        }
+        setSessionName(name);
+        location.href = '/room/' + encodeURIComponent(code);
       });
     })();
   </script>

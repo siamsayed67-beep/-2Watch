@@ -8,32 +8,8 @@ const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
-const { createClient } = require('@supabase/supabase-js');
 const { parseMediaUrl, MEDIA_EXTENSIONS } = require('./lib/media');
 const transcode = require('./lib/transcode');
-
-// Supabase accounts are optional: without credentials, people join with just a name.
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-const supabase = SUPABASE_URL && SUPABASE_ANON_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-  : null;
-const authEnabled = !!supabase;
-
-/** Returns { id, name } for a valid Supabase access token, or null. */
-async function verifyToken(token) {
-  if (!authEnabled || typeof token !== 'string' || !token) return null;
-  try {
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data.user) return null;
-    const u = data.user;
-    return { id: u.id, name: u.user_metadata?.username || u.email?.split('@')[0] || 'Guest' };
-  } catch {
-    return null;
-  }
-}
-
-const bearer = (req) => req.get('authorization')?.replace(/^Bearer\s+/i, '');
 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 16384;
@@ -345,16 +321,11 @@ function fmtTime(sec) {
 
 /* -------------------------------------------------------------- HTTP API */
 
-// The browser needs these to talk to Supabase. The anon key is meant to be public;
-// what users can do with it is limited by Supabase's own rules.
 app.get('/api/config', (req, res) => {
-  res.json(authEnabled ? { supabaseUrl: SUPABASE_URL, supabaseAnonKey: SUPABASE_ANON_KEY } : {});
+  res.json({ maxUploadMb: MAX_UPLOAD_MB });
 });
 
-app.post('/api/rooms', async (req, res) => {
-  if (authEnabled && !(await verifyToken(bearer(req)))) {
-    return res.status(401).json({ error: 'Sign in to create a room.' });
-  }
+app.post('/api/rooms', (req, res) => {
   const room = createRoom(clean(req.body?.name, 60, 'Watch party'));
   res.json({ id: room.id });
 });
@@ -395,12 +366,7 @@ async function freeDiskBytes() {
 app.post('/api/rooms/:id/uploads', async (req, res) => {
   const room = rooms.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found.' });
-  let clientId = req.get('x-client-id');
-  if (authEnabled) {
-    const user = await verifyToken(bearer(req));
-    if (!user) return res.status(401).json({ error: 'Your sign-in expired. Refresh the page and try again.' });
-    clientId = user.id;
-  }
+  const clientId = req.get('x-client-id');
   const name = memberName(room, clientId);
   if (!name) return res.status(403).json({ error: 'Join the room before uploading.' });
   if (!canControl(room, clientId)) return res.status(403).json({ error: 'Only the host can add videos in this room.' });
@@ -611,32 +577,22 @@ io.on('connection', (socket) => {
   socket.on('time:ping', (cb) => typeof cb === 'function' && cb(Date.now()));
 
   // Recreates a room lost in a server restart from a viewer's copy (see restoreRoom).
-  socket.on('room:restore', async (data, cb) => {
+  socket.on('room:restore', (data, cb) => {
     if (typeof cb !== 'function') return;
     const roomId = String(data?.roomId ?? '');
     if (!/^[a-z0-9]{4,16}$/.test(roomId)) return cb({ ok: false, error: 'Invalid room code.' });
     let name = clean(data?.name, 32, 'Someone');
-    if (authEnabled) {
-      const user = await verifyToken(data?.token);
-      if (!user) return cb({ ok: false, error: 'Please sign in to join this room.', needsAuth: true });
-      name = clean(user.name, 32, 'Someone');
-    }
     // Another viewer may have restored it a moment ago; then there's nothing to do.
     if (!rooms.has(roomId)) restoreRoom(roomId, data?.snapshot, name);
     cb({ ok: true });
   });
 
-  socket.on('room:join', async (data, cb) => {
+  socket.on('room:join', (data, cb) => {
     if (typeof cb !== 'function') return;
     let clientId = clean(data?.clientId, 64);
-    let name = clean(data?.name, 32, 'Guest');
-    if (authEnabled) {
-      // Signed-in users are identified by their Supabase account, so the host role
-      // follows the account across devices and the name can't be faked.
-      const user = await verifyToken(data?.token);
-      if (!user) return cb({ ok: false, error: 'Please sign in to join this room.', needsAuth: true });
-      clientId = user.id;
-      name = clean(user.name, 32, 'Guest');
+    let name = clean(data?.name, 32);
+    if (!name) {
+      name = `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
     }
     const room = rooms.get(String(data?.roomId ?? ''));
     if (!room) return cb({ ok: false, notFound: true, error: 'This room does not exist or has closed.' });
@@ -652,7 +608,7 @@ io.on('connection', (socket) => {
     if (!room.hostId) room.hostId = clientId;
     if (room.hostId === clientId) clearTimeout(room.hostTimer);
 
-    cb({ ok: true, chat: room.chat, clientId });
+    cb({ ok: true, chat: room.chat, clientId, name });
     broadcastState(room);
     if (!returning) announce(room, `${name} joined`);
   });
@@ -755,6 +711,19 @@ io.on('connection', (socket) => {
     if (Date.now() - lastChatAt < 300) return { ok: false, error: 'Slow down a little.' };
     lastChatAt = Date.now();
     addChat(room, { name, text, from: socket.data.clientId });
+  });
+
+  on('user:rename', {}, (room, member, data) => {
+    const newName = clean(data?.name, 32);
+    if (!newName) return { ok: false, error: 'Name cannot be empty.' };
+    const oldName = member.name;
+    if (oldName === newName) return { ok: true, name: newName };
+    for (const m of room.members.values()) {
+      if (m.clientId === member.clientId) m.name = newName;
+    }
+    broadcastState(room);
+    announce(room, `${oldName} changed their name to ${newName}`);
+    return { ok: true, name: newName };
   });
 
   socket.on('disconnect', () => leaveRoom(socket));

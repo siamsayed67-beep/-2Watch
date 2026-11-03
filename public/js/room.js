@@ -9,13 +9,24 @@
     set(k, v) { try { localStorage.setItem('2watch.' + k, v); } catch {} },
   };
 
+  const sessionStore = {
+    get(k) { try { return sessionStorage.getItem('2watch.' + k); } catch { return null; } },
+    set(k, v) { try { sessionStorage.setItem('2watch.' + k, v); } catch {} },
+  };
+
+  // Clean up any legacy permanent name from localStorage so it's not permanent
+  try { localStorage.removeItem('2watch.name'); } catch {}
+
+  function getRandomGuestName() {
+    return 'Guest ' + Math.floor(1000 + Math.random() * 9000);
+  }
+
   const roomId = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
-  // Replaced by the Supabase user id once the server confirms who we are.
   let clientId =
-    store.get('clientId') ||
+    sessionStore.get('clientId') ||
     (() => {
       const id = crypto.randomUUID?.() || Math.random().toString(36).slice(2) + Date.now().toString(36);
-      store.set('clientId', id);
+      sessionStore.set('clientId', id);
       return id;
     })();
 
@@ -178,35 +189,26 @@
     })
     .catch(() => fatal('Could not reach the server. Refresh the page to try again.'));
 
-  let accountsOn = false;
-  const goSignIn = () => location.replace(`/?next=${encodeURIComponent(location.pathname)}`);
-
-  // With accounts switched on, only signed-in people can join; everyone else is sent to sign in first.
-  Auth.ready
-    .then(async (enabled) => {
-      accountsOn = enabled;
-      if (!enabled) {
-        $('nameInput').value = store.get('name') || '';
-        $('nameField').hidden = false;
-      } else {
-        const session = await Auth.getSession();
-        if (!session) return goSignIn();
-        myName = Auth.displayName(session.user);
-        $('joiningAs').textContent = `Joining as ${myName}`;
-        $('joiningAs').hidden = false;
-      }
-      $('joinBtn').disabled = false;
-    })
-    .catch(() => fatal('Could not load the sign-in service. Refresh the page to try again.'));
-
-  const accessToken = async () => (accountsOn ? (await Auth.getSession())?.access_token : undefined);
+  const savedName = sessionStore.get('name') || '';
+  if (savedName) $('nameInput').value = savedName;
+  $('nameField').hidden = false;
+  $('joinBtn').disabled = false;
 
   $('joinForm').addEventListener('submit', (e) => {
     e.preventDefault();
     // This click also counts as the user gesture browsers require before playing sound.
-    if (!accountsOn) {
-      myName = $('nameInput').value.trim() || 'Guest';
-      store.set('name', myName);
+    const inputName = $('nameInput').value.trim();
+    if (inputName) {
+      myName = inputName;
+      sessionStore.set('name', myName);
+    } else {
+      // User joined without any name: assign a random name for this session (not permanent)
+      let sessionName = sessionStore.get('name');
+      if (!sessionName) {
+        sessionName = getRandomGuestName();
+        sessionStore.set('name', sessionName);
+      }
+      myName = sessionName;
     }
     $('joinModal').hidden = true;
     connect();
@@ -216,21 +218,22 @@
     socket = io();
     socket.on('connect', async () => {
       setConnStatus(null);
-      // Fetched on every (re)connect so a refreshed token is used after long sessions.
-      const token = await accessToken();
-      const join = () => new Promise((resolve) => socket.emit('room:join', { roomId, clientId, name: myName, token }, resolve));
+      const join = () => new Promise((resolve) => socket.emit('room:join', { roomId, clientId, name: myName }, resolve));
       let res = await join();
       if (res?.notFound) {
         // The server restarted and lost the room: recreate it from our copy, then join again.
         const snapshot = roomSnapshot() || savedSnapshot();
         if (snapshot) {
-          await new Promise((resolve) => socket.emit('room:restore', { roomId, name: myName, token, snapshot }, resolve));
+          await new Promise((resolve) => socket.emit('room:restore', { roomId, name: myName, snapshot }, resolve));
           res = await join();
         }
       }
-      if (res?.needsAuth) return goSignIn();
       if (!res?.ok) return fatal(res?.error || 'Could not join the room.');
       clientId = res.clientId;
+      if (res.name) {
+        myName = res.name;
+        sessionStore.set('name', myName);
+      }
       $('chatLog').replaceChildren();
       res.chat.forEach(addChatMessage);
       syncClock();
@@ -858,6 +861,25 @@
     toast('Invite link copied. Send it to your friends!');
   };
 
+  if ($('changeNameBtn')) {
+    $('changeNameBtn').onclick = async () => {
+      const entered = window.prompt('Enter your name:', myName);
+      if (entered === null) return;
+      const newName = entered.trim();
+      if (!newName) {
+        toast('Name cannot be empty.');
+        return;
+      }
+      if (newName === myName) return;
+      const res = await send('user:rename', { name: newName });
+      if (res?.ok) {
+        myName = newName;
+        sessionStore.set('name', myName);
+        toast(`Name changed to ${newName}`);
+      }
+    };
+  }
+
   /* ------------------------------------------------------------- add media */
 
   for (const tabBtn of document.querySelectorAll('.tab')) {
@@ -920,8 +942,6 @@
 
   async function uploadApi(method, url, body) {
     const headers = { 'Content-Type': 'application/json', 'X-Client-Id': clientId };
-    const token = await accessToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw Object.assign(new Error(data.error || `Upload failed (${res.status}).`), { status: res.status });
