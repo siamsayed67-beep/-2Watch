@@ -126,7 +126,7 @@
       <h2 id="joinRoomName">a watch party</h2>
       <label class="field" id="nameField">
         <span>Your name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
-        <input class="input" id="nameInput" maxlength="32" placeholder="e.g. Sam (leave blank for random)" autofocus>
+        <input class="input" id="nameInput" maxlength="40" placeholder="e.g. Sam (leave blank for random)" autofocus>
       </label>
       <button class="btn primary big" type="submit" id="joinBtn">Join the room</button>
       <p class="hint" id="joinError"></p>
@@ -136,8 +136,9 @@
   <div class="toast" id="toast" hidden></div>
   <div id="fb-root"></div>
 
+  <script src="/js/names.js?v=3"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/players.js?v=2"></script>
-  <script src="/js/room.js?v=2"></script>
+  <script src="/js/players.js?v=3"></script>
+  <script src="/js/room.js?v=3"></script>
 </body>
 </html>

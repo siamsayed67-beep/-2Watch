@@ -31,7 +31,7 @@
         <h2>Start a watch party</h2>
         <label class="field">
           <span>Your name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
-          <input class="input" id="userNameInput" maxlength="32" placeholder="e.g. Alex (leave blank for random)">
+          <input class="input" id="userNameInput" maxlength="40" placeholder="e.g. Alex (leave blank for random)">
         </label>
         <label class="field">
           <span>Room name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
@@ -49,13 +49,14 @@
         </label>
         <label class="field">
           <span>Your name <small style="color:var(--muted);font-weight:normal">(optional)</small></span>
-          <input class="input" id="joinNameInput" maxlength="32" placeholder="e.g. Alex (leave blank for random)">
+          <input class="input" id="joinNameInput" maxlength="40" placeholder="e.g. Alex (leave blank for random)">
         </label>
         <button class="btn big" type="submit" id="joinBtn">Join room</button>
       </form>
     </section>
   </main>
 
+  <script src="/js/names.js?v=3"></script>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
@@ -64,6 +65,9 @@
       try { localStorage.removeItem('2watch.name'); } catch {}
 
       function getRandomGuestName() {
+        if (typeof window.getRandomGuestName === 'function') {
+          return window.getRandomGuestName();
+        }
         return 'Guest ' + Math.floor(1000 + Math.random() * 9000);
       }
 

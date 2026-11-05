@@ -11,6 +11,20 @@ const { Server } = require('socket.io');
 const { parseMediaUrl, MEDIA_EXTENSIONS } = require('./lib/media');
 const transcode = require('./lib/transcode');
 
+let funnyNames = [];
+try {
+  funnyNames = require('./names.json');
+} catch (e) {
+  console.warn('Could not load names.json:', e.message);
+}
+
+function getRandomGuestName() {
+  if (Array.isArray(funnyNames) && funnyNames.length > 0) {
+    return funnyNames[Math.floor(Math.random() * funnyNames.length)];
+  }
+  return `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB) || 16384;
 const UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024; // uploads are sent in pieces of this size
@@ -593,7 +607,7 @@ io.on('connection', (socket) => {
     if (typeof cb !== 'function') return;
     const roomId = String(data?.roomId ?? '');
     if (!/^[a-z0-9]{4,16}$/.test(roomId)) return cb({ ok: false, error: 'Invalid room code.' });
-    let name = clean(data?.name, 32, 'Someone');
+    let name = clean(data?.name, 40, 'Someone');
     // Another viewer may have restored it a moment ago; then there's nothing to do.
     if (!rooms.has(roomId)) restoreRoom(roomId, data?.snapshot, name);
     cb({ ok: true });
@@ -602,9 +616,9 @@ io.on('connection', (socket) => {
   socket.on('room:join', (data, cb) => {
     if (typeof cb !== 'function') return;
     let clientId = clean(data?.clientId, 64);
-    let name = clean(data?.name, 32);
+    let name = clean(data?.name, 40);
     if (!name) {
-      name = `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
+      name = getRandomGuestName();
     }
     const room = rooms.get(String(data?.roomId ?? ''));
     if (!room) return cb({ ok: false, notFound: true, error: 'This room does not exist or has closed.' });
@@ -726,7 +740,7 @@ io.on('connection', (socket) => {
   });
 
   on('user:rename', {}, (room, member, data) => {
-    const newName = clean(data?.name, 32);
+    const newName = clean(data?.name, 40);
     if (!newName) return { ok: false, error: 'Name cannot be empty.' };
     const oldName = member.name;
     if (oldName === newName) return { ok: true, name: newName };

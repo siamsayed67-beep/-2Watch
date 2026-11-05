@@ -18,6 +18,9 @@
   try { localStorage.removeItem('2watch.name'); } catch {}
 
   function getRandomGuestName() {
+    if (typeof window.getRandomGuestName === 'function') {
+      return window.getRandomGuestName();
+    }
     return 'Guest ' + Math.floor(1000 + Math.random() * 9000);
   }
 
