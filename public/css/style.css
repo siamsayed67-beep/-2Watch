@@ -293,11 +293,26 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 
 /* ---------- queue ---------- */
 
+.queue-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.queue-total { color: var(--muted); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.queue li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-2); border-radius: 10px; }
-.q-info { flex: 1; min-width: 0; display: grid; }
+.queue li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-2); border-radius: 10px; flex-wrap: wrap; }
+.q-info { flex: 1; min-width: 140px; display: grid; }
 .q-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .q-by { color: var(--muted); font-size: 12px; }
+.q-duration {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
 .empty { color: var(--muted); font-size: 14px; margin: 0; }
 
 /* ---------- users ---------- */

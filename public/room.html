@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Watch room · 2Watch</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/css/style.css?v=2">
+  <link rel="stylesheet" href="/css/style.css?v=4">
 </head>
 <body class="room-page">
   <header class="topbar">
@@ -92,7 +92,10 @@
       </div>
 
       <div class="card">
-        <h2>Up next</h2>
+        <div class="queue-head">
+          <h2>Up next</h2>
+          <span class="queue-total" id="queueTotal" hidden></span>
+        </div>
         <ol class="queue" id="queue"></ol>
         <p class="empty" id="queueEmpty">The queue is empty.</p>
       </div>
@@ -136,9 +139,9 @@
   <div class="toast" id="toast" hidden></div>
   <div id="fb-root"></div>
 
-  <script src="/js/names.js?v=3"></script>
+  <script src="/js/names.js?v=4"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/players.js?v=3"></script>
-  <script src="/js/room.js?v=3"></script>
+  <script src="/js/players.js?v=4"></script>
+  <script src="/js/room.js?v=4"></script>
 </body>
 </html>

@@ -684,11 +684,28 @@
     return String(h % 360);
   }
 
+  const probedQueueIds = new Set();
+  function probeQueueItem(item) {
+    if (!item || item.duration || item.live || probedQueueIds.has(item.id)) return;
+    probedQueueIds.add(item.id);
+    if (item.kind === 'direct' || item.kind === 'file') {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = () => {
+        if (Number.isFinite(v.duration) && v.duration > 0) {
+          socket?.emit('media:meta', { mediaId: item.id, duration: v.duration });
+        }
+      };
+      v.src = item.src;
+    }
+  }
+
   function renderQueue() {
     const ol = $('queue');
     const control = canControl();
     ol.replaceChildren(
       ...state.queue.map((item) => {
+        probeQueueItem(item);
         const li = document.createElement('li');
         const badge = document.createElement('span');
         badge.className = `badge kind-${item.kind}`;
@@ -700,9 +717,17 @@
         title.textContent = item.title;
         const by = document.createElement('span');
         by.className = 'q-by';
+        const runtime = item.live ? 'Live' : (item.duration ? fmt(item.duration) : '');
         by.textContent = `added by ${item.addedBy}`;
         info.append(title, by);
         li.append(badge, info);
+        if (runtime) {
+          const durBadge = document.createElement('span');
+          durBadge.className = 'q-duration';
+          durBadge.textContent = runtime;
+          durBadge.title = item.live ? 'Live stream' : `Runtime: ${runtime}`;
+          li.append(durBadge);
+        }
         if (control) {
           const play = document.createElement('button');
           play.className = 'btn small';
@@ -720,6 +745,24 @@
       }),
     );
     $('queueEmpty').hidden = state.queue.length > 0;
+    renderQueueTotal();
+  }
+
+  // Total runtime of everything waiting in the queue. Live streams and items whose
+  // length isn't known yet can't be summed, so the total gets a "+" when any are present.
+  function renderQueueTotal() {
+    const el = $('queueTotal');
+    const items = state.queue;
+    const known = items.filter((q) => !q.live && q.duration > 0);
+    const total = known.reduce((sum, q) => sum + q.duration, 0);
+    const partial = known.length < items.length;
+    const count = `${items.length} video${items.length === 1 ? '' : 's'}`;
+    el.hidden = items.length === 0;
+    if (!items.length) return;
+    el.textContent = known.length ? `${count} · ${fmt(total)}${partial ? '+' : ''}` : count;
+    el.title = partial
+      ? `Total runtime of ${known.length} of ${items.length} videos (others are live or their length isn't known yet)`
+      : 'Total runtime of the queue';
   }
 
   function renderNowPlaying() {
@@ -901,11 +944,22 @@
   });
 
   let selectedFile = null;
+  let selectedFileDuration = null;
   let currentUpload = null;
 
   function selectFile(file) {
     if (!file) return;
     selectedFile = file;
+    selectedFileDuration = null;
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => {
+      URL.revokeObjectURL(v.src);
+      if (Number.isFinite(v.duration) && v.duration > 0) {
+        selectedFileDuration = v.duration;
+      }
+    };
+    v.src = URL.createObjectURL(file);
     $('dzLabel').textContent = file.name;
     $('dzSub').textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · ready to upload`;
     renderControls();
@@ -1040,7 +1094,7 @@
       setProgress(100, 'Finishing…');
       for (let attempt = 1; ; attempt++) {
         try {
-          await uploadApi('POST', `/api/uploads/${uploadId}/complete`, { mode });
+          await uploadApi('POST', `/api/uploads/${uploadId}/complete`, { mode, duration: selectedFileDuration });
           break;
         } catch (err) {
           if (upload.cancelled) throw CANCELLED;
@@ -1050,6 +1104,7 @@
       }
 
       selectedFile = null;
+      selectedFileDuration = null;
       $('fileInput').value = '';
       $('dzLabel').innerHTML = 'Drop a video here or <u>choose a file</u>';
       $('dzSub').textContent = 'MP4 (H.264/AAC) or WebM plays in every browser';

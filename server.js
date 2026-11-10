@@ -330,6 +330,57 @@ function playNowOrQueue(room, item, mode, byName) {
   }
 }
 
+async function resolveMediaMetadata(room, item) {
+  if (!item || item.duration) return;
+  try {
+    if (item.kind === 'youtube' && item.videoId) {
+      const res = await fetch(`https://www.youtube.com/watch?v=${item.videoId}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const mDur = html.match(/"lengthSeconds":"(\d+)"/);
+        const mTitle = html.match(/<meta\s+name="title"\s+content="([^"]+)"/i) || html.match(/<title>([^<]+)<\/title>/i);
+        let changed = false;
+        if (mDur && Number(mDur[1]) > 0) {
+          item.duration = Number(mDur[1]);
+          changed = true;
+        }
+        if (mTitle && item.titleFromClient) {
+          const t = mTitle[1].replace(/ - YouTube$/i, '').trim();
+          if (t) {
+            item.title = clean(t, 120);
+            item.titleFromClient = false;
+            changed = true;
+          }
+        }
+        if (changed && rooms.has(room.id)) broadcastState(room);
+      }
+    } else if (item.kind === 'vimeo' && item.src) {
+      const res = await fetch(`https://vimeo.com/api/oembed.json?url=${encodeURIComponent(item.src)}`, {
+        signal: AbortSignal.timeout(6000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        let changed = false;
+        if (Number(data.duration) > 0) {
+          item.duration = Number(data.duration);
+          changed = true;
+        }
+        if (data.title && item.titleFromClient) {
+          item.title = clean(data.title, 120);
+          item.titleFromClient = false;
+          changed = true;
+        }
+        if (changed && rooms.has(room.id)) broadcastState(room);
+      }
+    }
+    // Uploads are probed when they complete; direct links are measured by viewers' browsers
+    // (media:meta), so the server never runs ffprobe on a user-supplied URL.
+  } catch {}
+}
+
 function memberName(room, clientId) {
   for (const m of room.members.values()) if (m.clientId === clientId) return m.name;
   return null;
@@ -486,7 +537,17 @@ app.post('/api/uploads/:uploadId/complete', (req, res) => {
   }
   pendingUploads.delete(up.id);
   room.files.add(up.file);
-  const item = { id: randomId(10), kind: 'file', file: up.file, src: `/media/${up.file}`, title: up.title, duration: null, addedBy: up.name };
+  let duration = Number(req.body?.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    duration = null;
+    if (transcode.available) {
+      try {
+        const p = transcode.probe(path.join(UPLOAD_DIR, up.file));
+        if (p.duration) duration = p.duration;
+      } catch {}
+    }
+  }
+  const item = { id: randomId(10), kind: 'file', file: up.file, src: `/media/${up.file}`, title: up.title, duration, addedBy: up.name };
   playNowOrQueue(room, item, req.body?.mode, up.name);
   queueEncode(room, item);
   res.json({ ok: true });
@@ -666,27 +727,29 @@ io.on('connection', (socket) => {
   on('media:set', { control: true }, (room, { name }, data) => {
     const parsed = parseMediaUrl(data.url ?? '');
     if (parsed.error) return { ok: false, error: parsed.error };
-    playNowOrQueue(room, { id: randomId(10), ...parsed, duration: null, addedBy: name }, data.mode, name);
+    const item = { id: randomId(10), ...parsed, duration: null, addedBy: name };
+    playNowOrQueue(room, item, data.mode, name);
+    resolveMediaMetadata(room, item);
   });
 
   // Players report what they learn after loading (length, real title, whether it's live).
   on('media:meta', {}, (room, ctx, data) => {
-    const m = room.media;
-    if (!m || data.mediaId !== m.id) return;
+    const target = room.media?.id === data.mediaId ? room.media : room.queue.find((q) => q.id === data.mediaId);
+    if (!target) return;
     let changed = false;
-    if (data.live === true && !m.live) {
-      m.live = true;
-      m.duration = null;
+    if (data.live === true && !target.live) {
+      target.live = true;
+      target.duration = null;
       changed = true;
     }
     const d = Number(data.duration);
-    if (!m.live && !m.duration && Number.isFinite(d) && d > 0 && d < 7 * 24 * 3600) {
-      m.duration = d;
+    if (!target.live && !target.duration && Number.isFinite(d) && d > 0 && d < 7 * 24 * 3600) {
+      target.duration = d;
       changed = true;
     }
-    if (m.titleFromClient && typeof data.title === 'string' && data.title.trim()) {
-      m.title = clean(data.title, 120);
-      m.titleFromClient = false;
+    if (target.titleFromClient && typeof data.title === 'string' && data.title.trim()) {
+      target.title = clean(data.title, 120);
+      target.titleFromClient = false;
       changed = true;
     }
     if (changed) broadcastState(room);
