@@ -63,7 +63,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+// maxAge 0 makes browsers check for updates on every load, but with ETags an unchanged
+// file is answered with a tiny "304 Not Modified" instead of being downloaded again.
+app.use(express.static(path.join(__dirname, 'public'), { etag: true, maxAge: 0 }));
 app.get('/room/:id', (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.sendFile(path.join(__dirname, 'public', 'room.html'));

@@ -105,7 +105,8 @@
     el.textContent = text;
     el.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (el.hidden = true), 3500);
+    // Longer messages (e.g. a list of failed uploads) stay up long enough to read.
+    toastTimer = setTimeout(() => (el.hidden = true), Math.min(15000, Math.max(3500, text.length * 60)));
   }
 
   function send(event, data = {}) {
@@ -691,11 +692,22 @@
     if (item.kind === 'direct' || item.kind === 'file') {
       const v = document.createElement('video');
       v.preload = 'metadata';
+      // Detach as soon as we have the length (or give up), so this hidden element doesn't
+      // keep a connection open and pull video data that competes with what's playing.
+      const release = () => {
+        clearTimeout(timer);
+        v.onloadedmetadata = v.onerror = null;
+        v.removeAttribute('src');
+        v.load();
+      };
+      const timer = setTimeout(release, 15000);
       v.onloadedmetadata = () => {
         if (Number.isFinite(v.duration) && v.duration > 0) {
           socket?.emit('media:meta', { mediaId: item.id, duration: v.duration });
         }
+        release();
       };
+      v.onerror = release;
       v.src = item.src;
     }
   }
@@ -862,7 +874,7 @@
     $('skipBtn').disabled = !control || !hasMedia;
     $('lockedNote').hidden = control;
     $('addCard').classList.toggle('disabled', !control);
-    for (const el of $('addCard').querySelectorAll('input, button')) el.disabled = !control || (el.id.startsWith('upload') && !selectedFiles.length);
+    for (const el of $('addCard').querySelectorAll('input, button')) el.disabled = !control || ((el.id === 'uploadNow' || el.id === 'uploadQueue') && !selectedFiles.length);
     const playing = !!playback?.playing;
     $('playBtn').innerHTML = playing ? ICON.pause : ICON.play;
     $('playBtn').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -1029,28 +1041,42 @@
   function resetFileSelection() {
     selectedFiles = [];
     $('fileInput').value = '';
-    $('dzLabel').innerHTML = 'Drop videos here or <u>choose files</u>';
-    $('dzSub').textContent = 'Pick one or several · MP4 (H.264/AAC) or WebM plays in every browser';
+    if (currentUpload) {
+      $('dzLabel').innerHTML = 'Uploading… drop or <u>choose more videos</u>';
+      $('dzSub').textContent = 'They’ll upload after the current ones and join the queue';
+    } else {
+      $('dzLabel').innerHTML = 'Drop videos here or <u>choose files</u>';
+      $('dzSub').textContent = 'Pick one or several · MP4 (H.264/AAC) or WebM plays in every browser';
+    }
     $('uploadNow').textContent = 'Upload & play';
     $('uploadQueue').textContent = 'Upload to queue';
+  }
+
+  // Measures each file's length in the browser so the queue can show it straight away.
+  function toUploadEntry(file) {
+    const entry = { file, duration: null };
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.onloadedmetadata = () => {
+      URL.revokeObjectURL(v.src);
+      if (Number.isFinite(v.duration) && v.duration > 0) entry.duration = v.duration;
+    };
+    v.onerror = () => URL.revokeObjectURL(v.src);
+    v.src = URL.createObjectURL(file);
+    return entry;
   }
 
   function selectFiles(fileList) {
     const files = [...(fileList || [])].filter((f) => f.size > 0);
     if (!files.length) return;
-    selectedFiles = files.map((file) => {
-      const entry = { file, duration: null };
-      // Measure each file's length in the browser so the queue can show it straight away.
-      const v = document.createElement('video');
-      v.preload = 'metadata';
-      v.onloadedmetadata = () => {
-        URL.revokeObjectURL(v.src);
-        if (Number.isFinite(v.duration) && v.duration > 0) entry.duration = v.duration;
-      };
-      v.onerror = () => URL.revokeObjectURL(v.src);
-      v.src = URL.createObjectURL(file);
-      return entry;
-    });
+    // An upload is already running: add these to it so they go into the queue after it.
+    if (currentUpload) {
+      currentUpload.files.push(...files.map(toUploadEntry));
+      resetFileSelection();
+      toast(`Added ${files.length} more video${files.length === 1 ? '' : 's'} to the uploads.`);
+      return;
+    }
+    selectedFiles = files.map(toUploadEntry);
     const total = files.reduce((sum, f) => sum + f.size, 0);
     const many = files.length > 1;
     $('dzLabel').textContent = many ? `${files.length} videos selected` : files[0].name;
@@ -1072,7 +1098,7 @@
   dz.addEventListener('drop', (e) => {
     e.preventDefault();
     dz.classList.remove('over');
-    if (canControl() && !currentUpload) selectFiles(e.dataTransfer.files);
+    if (canControl()) selectFiles(e.dataTransfer.files);
   });
 
   $('uploadNow').onclick = () => startUpload('now');
@@ -1135,8 +1161,9 @@
   // playing and the rest join the queue in the order they were picked.
   async function startUpload(mode) {
     if (!selectedFiles.length || currentUpload) return;
-    const files = selectedFiles;
-    const upload = (currentUpload = { cancelled: false, xhr: null, id: null });
+    // `files` can grow while this runs: files picked or dropped meanwhile are appended.
+    const upload = (currentUpload = { cancelled: false, xhr: null, id: null, files: selectedFiles });
+    const { files } = upload;
     resetFileSelection();
 
     $('uploadProgress').hidden = false;
@@ -1147,7 +1174,7 @@
     let cancelled = false;
     for (let i = 0; i < files.length; i++) {
       const { file, duration } = files[i];
-      const label = files.length > 1 ? `${i + 1}/${files.length} · ` : '';
+      const label = () => (files.length > 1 ? `${i + 1}/${files.length} · ` : '');
       const fileMode = mode === 'now' && i === 0 ? 'now' : 'queue';
       upload.id = null;
       try {
@@ -1176,7 +1203,7 @@
   async function uploadOne(upload, file, duration, mode, label) {
     const setProgress = (pct, text) => {
       $('uploadBar').style.width = pct + '%';
-      $('uploadText').textContent = label + text;
+      $('uploadText').textContent = label() + text;
     };
     setProgress(0, `Starting ${file.name}…`);
 
@@ -1241,6 +1268,7 @@
 
   function finishUpload(msg) {
     currentUpload = null;
+    if (!selectedFiles.length) resetFileSelection();
     $('uploadProgress').hidden = true;
     $('uploadNow').hidden = $('uploadQueue').hidden = false;
     renderControls();
