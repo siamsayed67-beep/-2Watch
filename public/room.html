@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Watch room · 2Watch</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/css/style.css?v=4">
+  <link rel="stylesheet" href="/css/style.css?v=5">
 </head>
 <body class="room-page">
   <header class="topbar">
@@ -74,9 +74,9 @@
 
         <div class="tab-panel" data-panel="upload" hidden>
           <label class="dropzone" id="dropzone">
-            <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.mov,.m3u8" hidden>
-            <span class="dz-main" id="dzLabel">Drop a video here or <u>choose a file</u></span>
-            <span class="dz-sub" id="dzSub">MP4 (H.264/AAC) or WebM plays in every browser</span>
+            <input type="file" id="fileInput" accept="video/*,audio/*,.mkv,.mov,.m3u8" multiple hidden>
+            <span class="dz-main" id="dzLabel">Drop videos here or <u>choose files</u></span>
+            <span class="dz-sub" id="dzSub">Pick one or several · MP4 (H.264/AAC) or WebM plays in every browser</span>
           </label>
           <div class="upload-progress" id="uploadProgress" hidden>
             <div class="bar"><div class="bar-fill" id="uploadBar"></div></div>
@@ -139,9 +139,9 @@
   <div class="toast" id="toast" hidden></div>
   <div id="fb-root"></div>
 
-  <script src="/js/names.js?v=4"></script>
+  <script src="/js/names.js?v=5"></script>
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/players.js?v=4"></script>
-  <script src="/js/room.js?v=4"></script>
+  <script src="/js/players.js?v=5"></script>
+  <script src="/js/room.js?v=5"></script>
 </body>
 </html>

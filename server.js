@@ -771,6 +771,19 @@ io.on('connection', (socket) => {
     broadcastState(room);
   });
 
+  // Drag-to-reorder: moves one queued item to a new position.
+  on('queue:move', { control: true }, (room, ctx, data) => {
+    const from = room.queue.findIndex((q) => q.id === data.id);
+    if (from < 0) return { ok: false, error: 'That item is no longer in the queue.' };
+    const to = Math.trunc(Number(data.index));
+    if (!Number.isFinite(to)) return { ok: false, error: 'Invalid position.' };
+    const target = Math.max(0, Math.min(room.queue.length - 1, to));
+    if (target === from) return;
+    const [item] = room.queue.splice(from, 1);
+    room.queue.splice(target, 0, item);
+    broadcastState(room);
+  });
+
   on('queue:next', { control: true }, (room, { name }) => {
     if (!room.media) return;
     announce(room, `${name} skipped "${room.media.title}"`);

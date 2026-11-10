@@ -700,13 +700,91 @@
     }
   }
 
+  // ---- reordering the queue (drag the ☰ handle, or focus it and press ↑/↓) ----
+  let queueDrag = null; // { li, id, startIndex } while a card is being dragged
+  let queueRenderPending = false;
+
+  // Moves an item locally right away (so the list doesn't jump back), then tells the server.
+  function moveQueueItem(id, index) {
+    const from = state.queue.findIndex((q) => q.id === id);
+    if (from < 0) return;
+    const to = clamp(index, 0, state.queue.length - 1);
+    if (to === from) return;
+    const [item] = state.queue.splice(from, 1);
+    state.queue.splice(to, 0, item);
+    renderQueue();
+    send('queue:move', { id, index: to });
+  }
+
+  function startQueueDrag(e, handle, li, id) {
+    if (e.button !== 0 || queueDrag) return;
+    e.preventDefault();
+    const ol = $('queue');
+    handle.setPointerCapture(e.pointerId);
+    queueDrag = { li, id, startIndex: [...ol.children].indexOf(li) };
+    li.classList.add('dragging');
+    ol.classList.add('reordering');
+
+    const onMove = (ev) => {
+      let before = null;
+      for (const sib of ol.children) {
+        if (sib === li) continue;
+        const r = sib.getBoundingClientRect();
+        if (ev.clientY < r.top + r.height / 2) { before = sib; break; }
+      }
+      if (before) { if (li.nextElementSibling !== before) ol.insertBefore(li, before); }
+      else if (ol.lastElementChild !== li) ol.append(li);
+      // Scroll the page when dragging near the top or bottom edge.
+      if (ev.clientY < 60) window.scrollBy(0, -12);
+      else if (ev.clientY > window.innerHeight - 60) window.scrollBy(0, 12);
+    };
+    const onEnd = () => {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onEnd);
+      handle.removeEventListener('pointercancel', onEnd);
+      li.classList.remove('dragging');
+      ol.classList.remove('reordering');
+      const newIndex = [...ol.children].indexOf(li);
+      const { startIndex } = queueDrag;
+      queueDrag = null;
+      if (newIndex !== startIndex) moveQueueItem(id, newIndex);
+      else if (queueRenderPending) renderQueue();
+    };
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onEnd);
+    handle.addEventListener('pointercancel', onEnd);
+  }
+
+  function makeQueueHandle(li, item, index) {
+    const handle = document.createElement('button');
+    handle.type = 'button';
+    handle.className = 'q-handle';
+    handle.dataset.id = item.id;
+    handle.title = 'Drag to reorder';
+    handle.setAttribute('aria-label', `Move "${item.title}" (position ${index + 1}). Use the up and down arrow keys.`);
+    handle.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+    handle.addEventListener('pointerdown', (e) => startQueueDrag(e, handle, li, item.id));
+    handle.addEventListener('keydown', (e) => {
+      const delta = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
+      if (!delta) return;
+      e.preventDefault();
+      moveQueueItem(item.id, index + delta);
+      document.querySelector(`.q-handle[data-id="${CSS.escape(item.id)}"]`)?.focus();
+    });
+    return handle;
+  }
+
   function renderQueue() {
+    // Don't rebuild the list under the user's pointer mid-drag; catch up when they let go.
+    if (queueDrag) { queueRenderPending = true; return; }
+    queueRenderPending = false;
     const ol = $('queue');
     const control = canControl();
     ol.replaceChildren(
-      ...state.queue.map((item) => {
+      ...state.queue.map((item, index) => {
         probeQueueItem(item);
         const li = document.createElement('li');
+        if (control && state.queue.length > 1) li.append(makeQueueHandle(li, item, index));
         const badge = document.createElement('span');
         badge.className = `badge kind-${item.kind}`;
         badge.textContent = KIND_LABEL[item.kind] || item.kind;
@@ -784,7 +862,7 @@
     $('skipBtn').disabled = !control || !hasMedia;
     $('lockedNote').hidden = control;
     $('addCard').classList.toggle('disabled', !control);
-    for (const el of $('addCard').querySelectorAll('input, button')) el.disabled = !control || (el.id.startsWith('upload') && !selectedFile);
+    for (const el of $('addCard').querySelectorAll('input, button')) el.disabled = !control || (el.id.startsWith('upload') && !selectedFiles.length);
     const playing = !!playback?.playing;
     $('playBtn').innerHTML = playing ? ICON.pause : ICON.play;
     $('playBtn').setAttribute('aria-label', playing ? 'Pause' : 'Play');
@@ -943,29 +1021,48 @@
     if (res?.ok) $('linkInput').value = '';
   });
 
-  let selectedFile = null;
-  let selectedFileDuration = null;
+  let selectedFiles = []; // [{ file, duration }] in the order they'll be uploaded
   let currentUpload = null;
 
-  function selectFile(file) {
-    if (!file) return;
-    selectedFile = file;
-    selectedFileDuration = null;
-    const v = document.createElement('video');
-    v.preload = 'metadata';
-    v.onloadedmetadata = () => {
-      URL.revokeObjectURL(v.src);
-      if (Number.isFinite(v.duration) && v.duration > 0) {
-        selectedFileDuration = v.duration;
-      }
-    };
-    v.src = URL.createObjectURL(file);
-    $('dzLabel').textContent = file.name;
-    $('dzSub').textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · ready to upload`;
+  const fmtSize = (bytes) => (bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`);
+
+  function resetFileSelection() {
+    selectedFiles = [];
+    $('fileInput').value = '';
+    $('dzLabel').innerHTML = 'Drop videos here or <u>choose files</u>';
+    $('dzSub').textContent = 'Pick one or several · MP4 (H.264/AAC) or WebM plays in every browser';
+    $('uploadNow').textContent = 'Upload & play';
+    $('uploadQueue').textContent = 'Upload to queue';
+  }
+
+  function selectFiles(fileList) {
+    const files = [...(fileList || [])].filter((f) => f.size > 0);
+    if (!files.length) return;
+    selectedFiles = files.map((file) => {
+      const entry = { file, duration: null };
+      // Measure each file's length in the browser so the queue can show it straight away.
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = () => {
+        URL.revokeObjectURL(v.src);
+        if (Number.isFinite(v.duration) && v.duration > 0) entry.duration = v.duration;
+      };
+      v.onerror = () => URL.revokeObjectURL(v.src);
+      v.src = URL.createObjectURL(file);
+      return entry;
+    });
+    const total = files.reduce((sum, f) => sum + f.size, 0);
+    const many = files.length > 1;
+    $('dzLabel').textContent = many ? `${files.length} videos selected` : files[0].name;
+    $('dzSub').textContent = many
+      ? `${fmtSize(total)} · ${files.map((f) => f.name).join(', ')}`
+      : `${fmtSize(total)} · ready to upload`;
+    $('uploadNow').textContent = many ? 'Upload all & play first' : 'Upload & play';
+    $('uploadQueue').textContent = many ? 'Upload all to queue' : 'Upload to queue';
     renderControls();
   }
 
-  $('fileInput').addEventListener('change', (e) => selectFile(e.target.files[0]));
+  $('fileInput').addEventListener('change', (e) => selectFiles(e.target.files));
   const dz = $('dropzone');
   dz.addEventListener('dragover', (e) => {
     e.preventDefault();
@@ -975,7 +1072,7 @@
   dz.addEventListener('drop', (e) => {
     e.preventDefault();
     dz.classList.remove('over');
-    if (canControl()) selectFile(e.dataTransfer.files[0]);
+    if (canControl() && !currentUpload) selectFiles(e.dataTransfer.files);
   });
 
   $('uploadNow').onclick = () => startUpload('now');
@@ -1034,20 +1131,56 @@
     return m < 60 ? `about ${m} min left` : `about ${Math.floor(m / 60)} h ${m % 60} min left`;
   }
 
+  // Uploads every selected file, one after another. With "play now", the first file starts
+  // playing and the rest join the queue in the order they were picked.
   async function startUpload(mode) {
-    if (!selectedFile || currentUpload) return;
-    const file = selectedFile;
+    if (!selectedFiles.length || currentUpload) return;
+    const files = selectedFiles;
     const upload = (currentUpload = { cancelled: false, xhr: null, id: null });
+    resetFileSelection();
 
     $('uploadProgress').hidden = false;
     $('uploadNow').hidden = $('uploadQueue').hidden = true;
+
+    let done = 0;
+    const failed = [];
+    let cancelled = false;
+    for (let i = 0; i < files.length; i++) {
+      const { file, duration } = files[i];
+      const label = files.length > 1 ? `${i + 1}/${files.length} · ` : '';
+      const fileMode = mode === 'now' && i === 0 ? 'now' : 'queue';
+      upload.id = null;
+      try {
+        await uploadOne(upload, file, duration, fileMode, label);
+        done++;
+      } catch (err) {
+        // Throw away the partial file on the server.
+        if (upload.id) fetch(`/api/uploads/${upload.id}`, { method: 'DELETE' }).catch(() => {});
+        if (err === CANCELLED) { cancelled = true; break; }
+        failed.push(`${file.name}: ${err.message || 'Upload failed.'}`);
+      }
+    }
+
+    let msg;
+    if (files.length === 1) {
+      msg = cancelled ? 'Upload cancelled.' : failed.length ? failed[0].replace(/^[^:]*: /, '')
+        : mode === 'queue' ? 'Uploaded and added to the queue.' : 'Uploaded! Starting for everyone…';
+    } else {
+      msg = `Uploaded ${done} of ${files.length} videos.`;
+      if (cancelled) msg += ' The rest were cancelled.';
+      if (failed.length) msg += ` Failed: ${failed.join(' · ')}`;
+    }
+    finishUpload(msg);
+  }
+
+  async function uploadOne(upload, file, duration, mode, label) {
     const setProgress = (pct, text) => {
       $('uploadBar').style.width = pct + '%';
-      $('uploadText').textContent = text;
+      $('uploadText').textContent = label + text;
     };
-    setProgress(0, 'Starting…');
+    setProgress(0, `Starting ${file.name}…`);
 
-    try {
+    {
       const { uploadId, chunkSize } = await uploadApi('POST', `/api/rooms/${encodeURIComponent(roomId)}/uploads`, {
         name: file.name,
         size: file.size,
@@ -1094,7 +1227,7 @@
       setProgress(100, 'Finishing…');
       for (let attempt = 1; ; attempt++) {
         try {
-          await uploadApi('POST', `/api/uploads/${uploadId}/complete`, { mode, duration: selectedFileDuration });
+          await uploadApi('POST', `/api/uploads/${uploadId}/complete`, { mode, duration });
           break;
         } catch (err) {
           if (upload.cancelled) throw CANCELLED;
@@ -1102,17 +1235,7 @@
           await sleep(2000 * attempt);
         }
       }
-
-      selectedFile = null;
-      selectedFileDuration = null;
-      $('fileInput').value = '';
-      $('dzLabel').innerHTML = 'Drop a video here or <u>choose a file</u>';
-      $('dzSub').textContent = 'MP4 (H.264/AAC) or WebM plays in every browser';
-      finishUpload(mode === 'queue' ? 'Uploaded and added to the queue.' : 'Uploaded! Starting for everyone…');
-    } catch (err) {
-      // Throw away the partial file on the server.
-      if (upload.id) fetch(`/api/uploads/${upload.id}`, { method: 'DELETE' }).catch(() => {});
-      finishUpload(err === CANCELLED ? 'Upload cancelled.' : err.message || 'Upload failed.');
+      upload.id = null; // finished: nothing to clean up
     }
   }
 

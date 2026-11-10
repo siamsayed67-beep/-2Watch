@@ -297,6 +297,16 @@ input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius
 .queue-total { color: var(--muted); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .queue li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-2); border-radius: 10px; flex-wrap: wrap; }
+.q-handle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 32px; margin-left: -4px; padding: 0;
+  background: none; border: 0; border-radius: 6px; color: var(--muted);
+  cursor: grab; touch-action: none; flex-shrink: 0;
+}
+.q-handle:hover { color: var(--text); background: var(--card-2); }
+.q-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.queue.reordering, .queue.reordering .q-handle { cursor: grabbing; user-select: none; }
+.queue li.dragging { outline: 2px solid var(--accent); box-shadow: 0 6px 20px rgba(0, 0, 0, .35); position: relative; z-index: 1; }
 .q-info { flex: 1; min-width: 140px; display: grid; }
 .q-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .q-by { color: var(--muted); font-size: 12px; }
